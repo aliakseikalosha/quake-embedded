@@ -1483,7 +1483,7 @@ pack_t *COM_LoadPackFile (char *packfile)
 	int                             numpackfiles;
 	pack_t                  *pack;
 	int                             packhandle;
-	dpackfile_t             info[MAX_FILES_IN_PACK];
+	dpackfile_t             *info;
 	unsigned short          crc;
 
 
@@ -1508,6 +1508,9 @@ pack_t *COM_LoadPackFile (char *packfile)
 		com_modified = true;    // not the original file
 
 	newfiles = Hunk_AllocName (numpackfiles * sizeof(packfile_t), "packfile");
+
+	// directory is up to 128KB: keep it off the (possibly small) stack
+	info = Hunk_TempAlloc (header.dirlen);
 
 	Sys_FileSeek (packhandle, header.dirofs);
 	Sys_FileRead (packhandle, (void *)info, header.dirlen);

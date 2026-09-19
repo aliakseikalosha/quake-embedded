@@ -74,7 +74,14 @@ uint64_t qembd_get_us_time();
 void qembd_udelay(uint32_t us);
 void *qembd_allocmain(size_t size);
 int qembd_main(int c, char **v);
+int qembd_init(int c, char **v);
+void qembd_frame(void);
 int qembd_dequeue_key_event(key_event_t *e);
 int qembd_get_mouse_movement(mouse_movement_t *movement);
+
+/* Hooks for boards that cannot own the process (e.g. Playdate) */
+void qembd_log(const char *text);
+void qembd_fatal(const char *msg) __attribute__((noreturn));
+void qembd_quit(void) __attribute__((noreturn));
 
 #endif /* __QUAKEMBD_H */

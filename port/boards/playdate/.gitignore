@@ -1,0 +1,4 @@
+# Built by CMake / copied in by playdate_game.cmake
+Source/pdex.*
+# Game data is not redistributable (shareware pak0.pak is user-supplied)
+Source/id1/

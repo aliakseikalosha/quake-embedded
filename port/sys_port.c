@@ -18,7 +18,9 @@
 #include <quakedef.h>
 #include <quakembd.h>
 
+#ifndef DEFAULT_MEM_SIZE
 #define DEFAULT_MEM_SIZE (8 * 1024 * 1024)
+#endif
 #define DEFAULT_BASEDIR "quakembd"
 #define DEFAULT_CACHEDIR "/tmp"
 
@@ -49,6 +51,11 @@ void _Sys_Printf(const char *fmt, ...)
 		return;
 	}
 
+#ifdef QEMBD_PLAYDATE
+	qembd_log(text);
+	return;
+#endif
+
 	for (p = (unsigned char *) text; *p; p++) {
 		*p &= 0x7f;
 		if ((*p > 128 || *p < 32) && *p != 10 && *p != 13 && *p != 9)
@@ -67,10 +74,14 @@ void Sys_Error(char *error, ...)
 	va_start (argptr, error);
 	vsprintf (string, error, argptr);
 	va_end (argptr);
+#ifdef QEMBD_PLAYDATE
+	qembd_fatal(string);
+#else
 	fprintf(stderr, "Error: %s\n", string);
 
 	Host_Shutdown ();
 	exit (1);
+#endif
 }
 
 // =======================================================================
@@ -80,7 +91,11 @@ void Sys_Error(char *error, ...)
 void Sys_Quit(void)
 {
 	Host_Shutdown();
+#ifdef QEMBD_PLAYDATE
+	qembd_quit();
+#else
 	exit(0);
+#endif
 }
 
 double Sys_FloatTime(void)
@@ -117,9 +132,10 @@ void Sys_MakeCodeWriteable(unsigned long startaddr, unsigned long length)
 {
 }
 
-int qembd_main(int c, char **v)
+static float oldtime;
+
+int qembd_init(int c, char **v)
 {
-	float time, oldtime, newtime;
 	quakeparms_t parms = {0};
 	int j;
 
@@ -132,10 +148,18 @@ int qembd_main(int c, char **v)
 	if (j)
 		parms.memsize = (int) (Q_atof(com_argv[j+1]) * 1024 * 1024);
 	parms.membase = qembd_allocmain(parms.memsize);
+#ifdef QEMBD_PLAYDATE
+	/* The heap left for a game varies; settle for less rather than fail. */
+	while (!parms.membase && !j && parms.memsize > DEFAULT_MIN_MEM_SIZE) {
+		parms.memsize -= 512 * 1024;
+		parms.membase = qembd_allocmain(parms.memsize);
+	}
+#endif
 	if (!parms.membase) {
 		qembd_error("Memory cannot be allocated");
 		return -1;
 	}
+	qembd_info("Quake heap: %d KiB", parms.memsize / 1024);
 
 	parms.basedir = DEFAULT_BASEDIR;
 // caching is disabled by default, use -cachedir to enable
@@ -150,22 +174,37 @@ int qembd_main(int c, char **v)
 	qembd_info("QuakEMBD - Based on WinQuake %0.3f", VERSION);
 
 	oldtime = Sys_FloatTime() - 0.1;
-	while (1) {
-		// find time spent rendering last frame
-		newtime = Sys_FloatTime();
-		time = newtime - oldtime;
+	return 0;
+}
 
-		if (time > sys_ticrate.value*2)
-			oldtime = newtime;
-		else
-			oldtime += time;
+void qembd_frame(void)
+{
+	float time, newtime;
 
-		Host_Frame(time);
+	// find time spent rendering last frame
+	newtime = Sys_FloatTime();
+	time = newtime - oldtime;
+
+	if (time > sys_ticrate.value*2)
+		oldtime = newtime;
+	else
+		oldtime += time;
+
+	Host_Frame(time);
 
 #if 0
-		// graphic debugging aids
-		if (sys_linerefresh.value)
-			Sys_LineRefresh ();
+	// graphic debugging aids
+	if (sys_linerefresh.value)
+		Sys_LineRefresh ();
 #endif
-	}
+}
+
+int qembd_main(int c, char **v)
+{
+	int r = qembd_init(c, v);
+
+	if (r)
+		return r;
+	while (1)
+		qembd_frame();
 }

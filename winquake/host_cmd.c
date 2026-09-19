@@ -561,7 +561,8 @@ void Host_Loadgame_f (void)
 	FILE	*f;
 	char	mapname[MAX_QPATH];
 	float	time, tfloat;
-	char	str[32768], *start;
+	static char	str[32768];
+	char	*start;
 	int		i, r;
 	edict_t	*ent;
 	int		entnum;
@@ -758,7 +759,8 @@ int LoadGamestate(char *level, char *startspot)
 	FILE	*f;
 	char	mapname[MAX_QPATH];
 	float	time, sk;
-	char	str[32768], *start;
+	static char	str[32768];
+	char	*start;
 	int		i, r;
 	edict_t	*ent;
 	int		entnum;

@@ -68,7 +68,7 @@ if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID MATCHES "Clang")
 	)
 endif()
 
-if(CMAKE_SYSTEM_NAME MATCHES "(Darwin|Linux)")
+if(CMAKE_SYSTEM_NAME MATCHES "(Darwin|Linux)" AND NOT BOARD_NAME STREQUAL "playdate")
 	list(APPEND WQ_SRCS
 		net_dgrm.c
 		net_udp.c

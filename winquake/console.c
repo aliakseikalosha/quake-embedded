@@ -150,7 +150,7 @@ If the line width has changed, reformat the buffer.
 void Con_CheckResize (void)
 {
 	int		i, j, width, oldwidth, oldtotallines, numlines, numchars;
-	char	tbuf[CON_TEXTSIZE];
+	static char	tbuf[CON_TEXTSIZE];
 
 	width = (vid.width >> 3) - 2;
 
@@ -351,14 +351,25 @@ void Con_DebugLog(char *file, char *fmt, ...)
 {
     va_list argptr; 
     static char data[1024];
+#ifndef QEMBD_PLAYDATE
     int fd;
+#endif
     
     va_start(argptr, fmt);
     vsprintf(data, fmt, argptr);
     va_end(argptr);
+#ifdef QEMBD_PLAYDATE
+    /* no libc file descriptors on the Playdate; use the stdio shim */
+    FILE *fp = fopen(file, "a");
+    if (fp) {
+        fwrite(data, 1, strlen(data), fp);
+        fclose(fp);
+    }
+#else
     fd = open(file, O_WRONLY | O_CREAT | O_APPEND, 0666);
     write(fd, data, strlen(data));
     close(fd);
+#endif
 }
 
 
