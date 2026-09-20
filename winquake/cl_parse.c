@@ -149,7 +149,7 @@ void CL_KeepaliveMessage (void)
 	static float lastmsg;
 	int		ret;
 	sizebuf_t	old;
-	byte		olddata[8192];
+	static byte	olddata[8192];
 	
 	if (sv.active)
 		return;		// no need if server is local

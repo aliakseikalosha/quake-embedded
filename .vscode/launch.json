@@ -1,0 +1,19 @@
+{
+	// Requires the "CodeLLDB" extension (vadimcn.vscode-lldb).
+	// Debugs the simulator build: the Playdate Simulator loads pdex.dylib from
+	// the .pdx, so breakpoints in Quake / port/boards/playdate resolve once it
+	// is loaded. The device has no debugger support in the SDK.
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"name": "Playdate Simulator: Quake",
+			"type": "lldb",
+			"request": "launch",
+			"program": "${env:PLAYDATE_SDK_PATH}/bin/Playdate Simulator.app/Contents/MacOS/Playdate Simulator",
+			"args": ["${workspaceFolder}/build-sim-debug/quake.pdx"],
+			"cwd": "${workspaceFolder}",
+			"preLaunchTask": "Playdate: build (simulator, debug)",
+			"initCommands": ["settings set target.process.stop-on-sharedlibrary-events false"]
+		}
+	]
+}

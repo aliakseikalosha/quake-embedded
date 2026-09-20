@@ -60,7 +60,20 @@ void qembd_udelay(uint32_t us)
 
 void *qembd_allocmain(size_t size)
 {
+#ifdef TARGET_SIMULATOR
+	/*
+	 * QuakeC strings are 32-bit offsets from pr_strings, and Quake computes
+	 * them from pointers into static buffers (sv.name, pr_string_temp, ...).
+	 * On a 64-bit host a malloc'd heap can be >2GB away from static data,
+	 * which truncates those offsets, so keep the heap in static storage.
+	 * (The device is 32-bit and allocates from the system heap below.)
+	 */
+	static byte pool[8 * 1024 * 1024] __attribute__((aligned(16)));
+
+	return size <= sizeof(pool) ? pool : NULL;
+#else
 	return qembd_pd->system->realloc(NULL, size);
+#endif
 }
 
 /* ------------------------------------------------------------- messages */

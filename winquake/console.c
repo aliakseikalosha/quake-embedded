@@ -385,7 +385,7 @@ Handles cursor positioning, line wrapping, etc
 void Con_Printf (char *fmt, ...)
 {
 	va_list		argptr;
-	char		msg[MAXPRINTMSG];
+	static char	msg[MAXPRINTMSG];
 	static qboolean	inupdate;
 	
 	va_start (argptr,fmt);
@@ -431,7 +431,7 @@ A Con_Printf that only shows up if the "developer" cvar is set
 void Con_DPrintf (char *fmt, ...)
 {
 	va_list		argptr;
-	char		msg[MAXPRINTMSG];
+	static char	msg[MAXPRINTMSG];
 		
 	if (!developer.value)
 		return;			// don't confuse non-developers with techie stuff...

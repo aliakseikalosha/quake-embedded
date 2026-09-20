@@ -1197,7 +1197,7 @@ void COM_CopyFile (char *netpath, char *cachepath)
 {
 	int             in, out;
 	int             remaining, count;
-	char    buf[4096];
+	static char    buf[4096];
 	
 	remaining = Sys_FileOpenRead (netpath, &in);            
 	COM_CreatePath (cachepath);     // create directories up to the cache file

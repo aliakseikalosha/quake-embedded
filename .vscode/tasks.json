@@ -1,0 +1,32 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Playdate: configure (simulator, debug)",
+			"type": "shell",
+			"command": "cmake -S . -B build-sim-debug -DBOARD_NAME=playdate -DCMAKE_BUILD_TYPE=Debug",
+			"problemMatcher": []
+		},
+		{
+			"label": "Playdate: build (simulator, debug)",
+			"type": "shell",
+			"command": "touch port/boards/playdate/main.c && cmake --build build-sim-debug -j 8",
+			"dependsOn": "Playdate: configure (simulator, debug)",
+			"problemMatcher": ["$gcc"],
+			"group": { "kind": "build", "isDefault": true }
+		},
+		{
+			"label": "Playdate: build (device)",
+			"type": "shell",
+			"command": "cmake -S . -B build-dev -DCMAKE_TOOLCHAIN_FILE=port/boards/playdate/toolchain.cmake -DBOARD_NAME=playdate && cmake --build build-dev -j 8",
+			"problemMatcher": ["$gcc"]
+		},
+		{
+			"label": "Install on device (USB)",
+			"type": "shell",
+			"dependsOn": "Playdate: build (device)",
+			"command": "./scripts/install-device.sh",
+			"problemMatcher": []
+		}
+	]
+}

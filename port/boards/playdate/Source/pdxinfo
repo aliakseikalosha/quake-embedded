@@ -1,6 +1,6 @@
 name=Quake Playdate
-author=Aliaksei Kalosha/ sysprog21
-description=Quake port for a Playdate
+author=Aliaksei Kalosha
+description=Quake port for a Playdate base on sysprog21 "Quake for embedded devices"
 bundleID=com.aliakseikalosha.quake
 version=0.1
 buildNumber=1

@@ -239,10 +239,16 @@ model_t *Mod_LoadModel (model_t *mod, qboolean crash)
 	unsigned *buf;
 	byte	stackbuf[1024];		// avoid dirtying the cache heap
 
-	if (!mod->needload) {
-		if (mod->type == mod_alias && Cache_Check(&mod->cache))
-			return mod;
-		return mod;		// not cached at all
+	if (!mod->needload)
+	{
+		if (mod->type == mod_alias)
+		{
+			if (Cache_Check (&mod->cache))
+				return mod;
+			// evicted from the cache: fall through and reload it
+		}
+		else
+			return mod;		// not cached at all
 	}
 
 //

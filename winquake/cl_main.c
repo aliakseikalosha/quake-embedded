@@ -171,7 +171,7 @@ An svc_signonnum has been received, perform a client side setup
 */
 void CL_SignonReply (void)
 {
-	char 	str[8192];
+	static char 	str[8192];
 
 Con_DPrintf ("CL_SignonReply: %i\n", cls.signon);
 

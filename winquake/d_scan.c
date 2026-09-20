@@ -46,8 +46,8 @@ void D_WarpScreen (void)
 	int		*turb;
 	int		*col;
 	byte	**row;
-	byte	*rowptr[MAXHEIGHT+(AMP2*2)];
-	int		column[MAXWIDTH+(AMP2*2)];
+	static byte	*rowptr[MAXHEIGHT+(AMP2*2)];	// static: keep big buffers off the small device stack
+	static int	column[MAXWIDTH+(AMP2*2)];
 	float	wratio, hratio;
 	unsigned int	_vid_rowbytes;
 
