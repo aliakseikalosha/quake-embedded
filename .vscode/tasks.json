@@ -16,15 +16,31 @@
 			"group": { "kind": "build", "isDefault": true }
 		},
 		{
+			"label": "Playdate: clean (simulator)",
+			"type": "shell",
+			// Build trees (they hold quake.pdx) plus the pdex library that the
+			// simulator build copies into Source/. Device outputs are untouched.
+			"command": "rm -rf build-sim build-sim-debug port/boards/playdate/Source/pdex.dylib port/boards/playdate/Source/pdex.so port/boards/playdate/Source/pdex.dll",
+			"problemMatcher": []
+		},
+		{
 			"label": "Playdate: build (device)",
 			"type": "shell",
 			"command": "cmake -S . -B build-dev -DCMAKE_TOOLCHAIN_FILE=port/boards/playdate/toolchain.cmake -DBOARD_NAME=playdate && cmake --build build-dev -j 8",
 			"problemMatcher": ["$gcc"]
 		},
 		{
+			"label": "Playdate: clean build (device)",
+			"type": "shell",
+			// Remove the build tree and the stale pdex.* binaries that pdc would
+			// otherwise bundle into the .pdx, then rebuild from scratch.
+			"command": "rm -rf build-dev port/boards/playdate/Source/pdex.* && cmake -S . -B build-dev -DCMAKE_TOOLCHAIN_FILE=port/boards/playdate/toolchain.cmake -DBOARD_NAME=playdate && cmake --build build-dev -j 8",
+			"problemMatcher": ["$gcc"]
+		},
+		{
 			"label": "Install on device (USB)",
 			"type": "shell",
-			"dependsOn": "Playdate: build (device)",
+			"dependsOn": "Playdate: clean build (device)",
 			"command": "./scripts/install-device.sh",
 			"problemMatcher": []
 		}

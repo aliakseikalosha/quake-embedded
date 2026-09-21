@@ -24,6 +24,18 @@ fi
 echo "Mounting data disk via $PD ..."
 "$PDUTIL" "$PD" datadisk
 
+# Always leave the device tidy, including when a step below fails:
+# drop the AppleDouble stub macOS creates on FAT and release the data disk.
+cleanup() {
+  if [ -d "$VOL/Games" ]; then
+    rm -f "$VOL/Games/._$PDX" 2>/dev/null || true
+    echo "Cleaning up ..."
+    sync
+    diskutil eject "$VOL" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
 for _ in $(seq 1 30); do [ -d "$VOL/Games" ] && break; sleep 1; done
 if [ ! -d "$VOL/Games" ]; then
   echo "$VOL/Games did not appear. If the Playdate is showing 'Data Disk', mount it manually and retry."
@@ -40,7 +52,6 @@ for attempt in 1 2 3 4 5; do
   echo "Copy failed (attempt $attempt), retrying ..."
   sleep 3
 done
-rm -f "$VOL/Games/._$PDX"   # AppleDouble stub macOS leaves on FAT
 if [ "$copied" != 1 ]; then
   echo "Could not write to $VOL/Games ('Operation not permitted' means macOS is blocking this app)."
   echo "Allow the app running this task (VS Code / Terminal) under System Settings > Privacy & Security >"
@@ -48,8 +59,9 @@ if [ "$copied" != 1 ]; then
   echo "from Terminal.app instead is a quick way to check."
   exit 1
 fi
-sync
-diskutil eject "$VOL"
+
+cleanup            # eject before launching; the game can't start from the disk
+trap - EXIT
 
 echo "Launching ..."
 for _ in $(seq 1 20); do PD=$(find_port); [ -n "$PD" ] && break; sleep 1; done

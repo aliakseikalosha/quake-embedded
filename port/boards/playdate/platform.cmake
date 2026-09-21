@@ -13,10 +13,10 @@ if(NOT EXISTS "${SDK}")
 	message(FATAL_ERROR "Playdate SDK not found; set PLAYDATE_SDK_PATH")
 endif()
 
-# 3D resolution. Quake's menus assume at least 320x200; it is scaled to the
-# 400x240 panel. Larger = sharper but slower.
-set(PD_RENDER_WIDTH 320 CACHE STRING "Quake render width (>= 320)")
-set(PD_RENDER_HEIGHT 200 CACHE STRING "Quake render height (>= 200)")
+# 3D resolution. Quake's menus assume at least 320x200. The image is drawn
+# 1:1 (no scaling), centred on the 400x240 panel; width must be a multiple of 8.
+set(PD_RENDER_WIDTH 320 CACHE STRING "Quake render width (>= 320, multiple of 8)")
+set(PD_RENDER_HEIGHT 240 CACHE STRING "Quake render height (>= 200)")
 
 if(NOT CMAKE_BUILD_TYPE)
 	set(CMAKE_BUILD_TYPE Release)
