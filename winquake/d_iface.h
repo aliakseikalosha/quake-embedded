@@ -19,8 +19,14 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 */
 // d_iface.h: interface header file for rasterization driver modules
 
+#ifdef PD_LOWRES_3D
+/* the 3D view is rendered at half the panel resolution into r_warpbuffer */
+#define WARP_WIDTH		(PD_RENDER_WIDTH / 2)
+#define WARP_HEIGHT		(PD_RENDER_HEIGHT / 2)
+#else
 #define WARP_WIDTH		320
 #define WARP_HEIGHT		200
+#endif
 
 #define MAX_LBM_HEIGHT	480
 
@@ -128,6 +134,8 @@ extern float	r_aliasuvscale;		// scale-up factor for screen u and v
 									//  on Alias vertices passed to driver
 extern int		r_pixbytes;
 extern qboolean	r_dowarp;
+extern qboolean	r_dosinewarp;
+void D_UpscaleScreen (void);
 
 extern affinetridesc_t	r_affinetridesc;
 extern spritedesc_t		r_spritedesc;

@@ -39,6 +39,7 @@ int			r_outofsurfaces;
 int			r_outofedges;
 
 qboolean	r_dowarp, r_dowarpold, r_viewchanged;
+qboolean	r_dosinewarp;	// underwater sine warp (as opposed to plain low-res upscale)
 
 int			numbtofpolys;
 btofpoly_t	*pbtofpolys;
@@ -325,6 +326,13 @@ void R_SetVrect (vrect_t *pvrectin, vrect_t *pvrect, int lineadj)
 	pvrect->x = (pvrectin->width - pvrect->width)/2;
 	pvrect->y = (h - pvrect->height)/2;
 
+#ifdef PD_LOWRES_3D
+	// keep the view on the 2x2 / byte grid the low-res upscale and the
+	// LCD pattern expansion rely on
+	pvrect->x &= ~7;
+	pvrect->y &= ~1;
+#endif
+
 	{
 		if (lcd_x.value)
 		{
@@ -351,6 +359,14 @@ void R_ViewChanged (vrect_t *pvrect, int lineadj, float aspect)
 	r_viewchanged = true;
 
 	R_SetVrect (pvrect, &r_refdef.vrect, lineadj);
+
+#ifdef PD_LOWRES_3D
+	// pvrect is the full-size screen; the 3D view is rendered at half size
+	r_refdef.vrect.x >>= 1;
+	r_refdef.vrect.y >>= 1;
+	r_refdef.vrect.width >>= 1;
+	r_refdef.vrect.height >>= 1;
+#endif
 
 	r_refdef.horizontalFieldOfView = 2.0f * tanf (r_refdef.fov_x * (M_PI/360.0f));
 	r_refdef.fvrectx = (float)r_refdef.vrect.x;
@@ -991,7 +1007,16 @@ SetVisibilityByPassages ();
 		dp_time2 = Sys_FloatTime ();
 
 	if (r_dowarp)
+	{
+#ifdef PD_LOWRES_3D
+		if (r_dosinewarp)
+			D_WarpScreen ();
+		else
+			D_UpscaleScreen ();
+#else
 		D_WarpScreen ();
+#endif
+	}
 
 	V_SetContentsColor (r_viewleaf->contents);
 

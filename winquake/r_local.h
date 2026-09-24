@@ -279,6 +279,7 @@ extern int		r_maxsurfsseen, r_maxedgesseen, r_cnumsurfs;
 extern qboolean	r_surfsonstack;
 extern cshift_t	cshift_water;
 extern qboolean	r_dowarpold, r_viewchanged;
+extern qboolean	r_dosinewarp;
 
 extern mleaf_t	*r_viewleaf, *r_oldviewleaf;
 

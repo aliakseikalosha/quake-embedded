@@ -15,8 +15,16 @@ endif()
 
 # 3D resolution. Quake's menus assume at least 320x200. The image is drawn
 # 1:1 (no scaling), centred on the 400x240 panel; width must be a multiple of 8.
-set(PD_RENDER_WIDTH 320 CACHE STRING "Quake render width (>= 320, multiple of 8)")
-set(PD_RENDER_HEIGHT 240 CACHE STRING "Quake render height (>= 200)")
+# With PD_LOWRES_3D the 3D view is rendered at half of this size and drawn as 2x2
+# pixel patterns (5 grey levels); menus, console and HUD stay at full size.
+option(PD_LOWRES_3D "Render the 3D view at half resolution with 2x2 grey patterns" ON)
+if(PD_LOWRES_3D)
+	set(_pd_default_w 400)
+else()
+	set(_pd_default_w 320)
+endif()
+set(PD_RENDER_WIDTH ${_pd_default_w} CACHE STRING "Quake render width (>= 320, multiple of 16 with PD_LOWRES_3D)")
+set(PD_RENDER_HEIGHT 240 CACHE STRING "Quake render height (>= 200, even)")
 
 if(NOT CMAKE_BUILD_TYPE)
 	set(CMAKE_BUILD_TYPE Release)
@@ -27,6 +35,7 @@ add_compile_definitions(
 	TARGET_EXTENSION=1
 	PD_RENDER_WIDTH=${PD_RENDER_WIDTH}
 	PD_RENDER_HEIGHT=${PD_RENDER_HEIGHT}
+	$<$<BOOL:${PD_LOWRES_3D}>:PD_LOWRES_3D=1>
 	# Quake heap: try DEFAULT, back off in 512 KiB steps down to MIN.
 	DEFAULT_MEM_SIZE=\(7*1024*1024\)
 	DEFAULT_MIN_MEM_SIZE=\(4*1024*1024\)

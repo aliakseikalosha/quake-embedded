@@ -90,6 +90,44 @@ void D_WarpScreen (void)
 	}
 }
 
+#ifdef PD_LOWRES_3D
+/* View rectangle (in full-resolution screen pixels) that holds the pixel-doubled
+ * 3D view. The display layer expands 2x2 blocks in it into 5-level patterns. */
+int	qembd_lowres_rect[4];
+
+/*
+=============
+D_UpscaleScreen
+
+Pixel-doubles the half-resolution view from r_warpbuffer into vid.buffer, so
+the 2D overlays (console, menu, HUD) can still be drawn on top of it.
+=============
+*/
+void D_UpscaleScreen (void)
+{
+	int		u, v;
+	int		w = r_refdef.vrect.width;
+	int		h = r_refdef.vrect.height;
+	unsigned int	rowbytes = vid.rowbytes;
+	byte	*dest = vid.buffer + (r_refdef.vrect.y * 2) * rowbytes + r_refdef.vrect.x * 2;
+	const byte	*src = d_viewbuffer + r_refdef.vrect.y * screenwidth + r_refdef.vrect.x;
+
+	for (v=0 ; v<h ; v++, src += screenwidth, dest += rowbytes * 2)
+	{
+		unsigned short	*d0 = (unsigned short *)dest;
+		unsigned short	*d1 = (unsigned short *)(dest + rowbytes);
+
+		for (u=0 ; u<w ; u++)
+			d0[u] = d1[u] = (unsigned short)(src[u] * 0x0101);
+	}
+
+	qembd_lowres_rect[0] = r_refdef.vrect.x * 2;
+	qembd_lowres_rect[1] = r_refdef.vrect.y * 2;
+	qembd_lowres_rect[2] = w * 2;
+	qembd_lowres_rect[3] = h * 2;
+}
+#endif
+
 /*
 =============
 D_DrawTurbulent8Span

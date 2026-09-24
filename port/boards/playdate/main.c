@@ -5,8 +5,9 @@
  *   D-pad up/down   walk forward / back      (menus: move)
  *   D-pad left/right turn                    (menus: change value)
  *   A               fire                     (menus: select)
- *   B               jump                     (menus: back)
- *   Crank           next / previous weapon
+ *   B               jump (on release)        (menus: back)
+ *   B + left/right  previous / next weapon
+ *   Crank           turn left / right
  *   System menu     "Quake Menu" opens Quake's own menu; "Always Run" toggles
  *                   running; "Show FPS" draws the frame rate.
  * While a demo is playing (title screen) A and B open Quake's menu.
@@ -22,7 +23,7 @@ PlaydateAPI *qembd_pd;
 
 enum { ST_SPLASH, ST_INIT, ST_RUN, ST_STOPPED };
 
-#define CRANK_STEP 40.0f	/* degrees of crank per weapon change */
+#define CRANK_TURN 1.0f		/* degrees of view turn per degree of crank */
 #define RUN_SPEED 400
 #define WALK_SPEED 200
 
@@ -177,9 +178,10 @@ static void poll_input(void)
 {
 	static PDButtons prev;
 	static int sent[NUM_BUTTONS];	/* key sent on press, released with the same */
-	static float crank;
+	static int b_combo;		/* B was used as a weapon-switch modifier */
 	PDButtons cur;
 	int ui = key_dest != key_game;
+	int playing = !ui && !cls.demoplayback;
 
 	qembd_pd->system->getButtonState(&cur, NULL, NULL);
 
@@ -190,13 +192,34 @@ static void poll_input(void)
 		if (down && !was) {
 			int key = ui ? buttons[i].ui_key : buttons[i].game_key;
 
+			/* B + left/right: switch weapon instead of turning */
+			if (playing && (cur & kButtonB) &&
+			    (buttons[i].mask == kButtonLeft || buttons[i].mask == kButtonRight)) {
+				Cbuf_AddText(buttons[i].mask == kButtonRight ?
+				             "impulse 10\n" : "impulse 12\n");
+				b_combo = 1;
+				sent[i] = 0;
+				continue;
+			}
+			/* In game B jumps on release, so it can act as a modifier */
+			if (playing && buttons[i].mask == kButtonB) {
+				b_combo = 0;
+				sent[i] = 0;
+				continue;
+			}
+
 			/* Title-screen demo: any button opens the menu */
 			if (!ui && cls.demoplayback && i >= 4)
 				key = K_ESCAPE;
 			sent[i] = key;
 			push_key(key, 1);
 		} else if (!down && was) {
-			push_key(sent[i], 0);
+			if (sent[i]) {
+				push_key(sent[i], 0);
+			} else if (buttons[i].mask == kButtonB && playing && !b_combo) {
+				push_key(buttons[i].game_key, 1);
+				push_key(buttons[i].game_key, 0);
+			}
 		}
 	}
 	prev = cur;
@@ -207,20 +230,9 @@ static void poll_input(void)
 		push_key(K_ESCAPE, 0);
 	}
 
-	/* Crank cycles weapons while playing */
-	crank += qembd_pd->system->getCrankChange();
-	if (key_dest != key_game || cls.state != ca_connected || cls.demoplayback) {
-		crank = 0;
-	} else {
-		while (crank >= CRANK_STEP) {
-			Cbuf_AddText("impulse 10\n");	/* next weapon */
-			crank -= CRANK_STEP;
-		}
-		while (crank <= -CRANK_STEP) {
-			Cbuf_AddText("impulse 12\n");	/* previous weapon */
-			crank += CRANK_STEP;
-		}
-	}
+	/* Crank turns the player while playing (clockwise = right) */
+	if (key_dest == key_game && cls.state == ca_connected && !cls.demoplayback)
+		cl.viewangles[YAW] -= qembd_pd->system->getCrankChange() * CRANK_TURN;
 }
 
 static void apply_run(void)

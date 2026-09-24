@@ -419,10 +419,25 @@ r_refdef.viewangles[2]=    0;
 	r_viewleaf = Mod_PointInLeaf (r_origin, cl.worldmodel);
 
 	r_dowarpold = r_dowarp;
-	r_dowarp = r_waterwarp.value && (r_viewleaf->contents <= CONTENTS_WATER);
+	r_dosinewarp = r_waterwarp.value && (r_viewleaf->contents <= CONTENTS_WATER);
+#ifdef PD_LOWRES_3D
+	r_dowarp = true;	// always render into the low-res buffer
+#else
+	r_dowarp = r_dosinewarp;
+#endif
 
 	if ((r_dowarp != r_dowarpold) || r_viewchanged || lcd_x.value)
 	{
+#ifdef PD_LOWRES_3D
+		vrect.x = 0;
+		vrect.y = 0;
+		vrect.width = vid.width;
+		vrect.height = vid.height;
+
+		R_ViewChanged (&vrect, sb_lines, vid.aspect);
+		r_viewchanged = false;
+		goto viewdone;
+#endif
 		if (r_dowarp)
 		{
 			if ((vid.width <= vid.maxwarpwidth) &&
@@ -474,6 +489,9 @@ r_refdef.viewangles[2]=    0;
 		}
 
 		r_viewchanged = false;
+#ifdef PD_LOWRES_3D
+viewdone:;
+#endif
 	}
 
 // start off with just the four screen edge clip planes
