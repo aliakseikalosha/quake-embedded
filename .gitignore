@@ -3,3 +3,6 @@
 build-sim
 build-dev
 build-sim-debug
+build-*/
+bench-results/
+tools/hostcheck/out/

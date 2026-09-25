@@ -21,6 +21,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "quakedef.h"
 #include "d_local.h"
+#include "pdprof.h"
 #include "r_local.h"
 
 float           surfscale;
@@ -263,6 +264,7 @@ D_CacheSurface
 surfcache_t *D_CacheSurface (msurface_t *surface, int miplevel)
 {
 	surfcache_t     *cache;
+	PROF_STK(K_CACHE);
 
 //
 // if the surface is animating or flashing, flush the cache
@@ -278,6 +280,29 @@ surfcache_t *D_CacheSurface (msurface_t *surface, int miplevel)
 //
 	cache = surface->cachespots[miplevel];
 
+#ifdef PD_FAST_SURFACES
+/*
+cache->dlight means "the texels contain dynamic light". R_MarkLights flags every surface on the
+nodes a light's radius reaches, and most of those get no light at all (48% of the dynamic-light
+rebuilds in the demos): if the light would change none of the surface's lightmap samples, a rebuild
+would produce exactly the texels already cached, so the cache stays. A surface that did get light is
+rebuilt once more when the light goes away, as before.
+*/
+	if (cache && cache->texture == r_drawsurf.texture
+			&& cache->lightadj[0] == r_drawsurf.lightadj[0]
+			&& cache->lightadj[1] == r_drawsurf.lightadj[1]
+			&& cache->lightadj[2] == r_drawsurf.lightadj[2]
+			&& cache->lightadj[3] == r_drawsurf.lightadj[3] )
+	{
+		if (surface->dlightframe != r_framecount)
+		{
+			if (!cache->dlight)
+				return cache;
+		}
+		else if (!cache->dlight && !R_DlightAffects (surface))
+			return cache;
+	}
+#else
 	if (cache && !cache->dlight && surface->dlightframe != r_framecount
 			&& cache->texture == r_drawsurf.texture
 			&& cache->lightadj[0] == r_drawsurf.lightadj[0]
@@ -285,32 +310,59 @@ surfcache_t *D_CacheSurface (msurface_t *surface, int miplevel)
 			&& cache->lightadj[2] == r_drawsurf.lightadj[2]
 			&& cache->lightadj[3] == r_drawsurf.lightadj[3] )
 		return cache;
+#endif
 
 //
 // determine shape of surface
 //
-	surfscale = 1.0 / (1<<miplevel);
+	surfscale = 1.0f / (float)(1<<miplevel);
 	r_drawsurf.surfmip = miplevel;
 	r_drawsurf.surfwidth = surface->extents[0] >> miplevel;
 	r_drawsurf.rowbytes = r_drawsurf.surfwidth;
 	r_drawsurf.surfheight = surface->extents[1] >> miplevel;
+	PROF_CNTF(C_CBUILD, 1);
+	PROF_CNTF(C_CTEXELS, r_drawsurf.surfwidth * r_drawsurf.surfheight);
+#ifdef PD_PROFILE_FINE
+	{
+		// why is this surface being built: 0 new, 1 dynamic light on it, 2 texture changed,
+		// 3 the light that was on it has gone (or the light styles changed)
+		int		cause, texels = r_drawsurf.surfwidth * r_drawsurf.surfheight;
+
+		if (!cache)
+			cause = 0;
+		else if (surface->dlightframe == r_framecount)
+			cause = 1;
+		else if (cache->texture != r_drawsurf.texture)
+			cause = 2;
+		else
+			cause = 3;
+		pdprof_cnt[C_BNEW + cause]++;
+		pdprof_cnt[C_TNEW + cause] += texels;
+	}
+#endif
 	
 //
 // allocate memory if needed
 //
 	if (!cache)     // if a texture just animated, don't reallocate it
 	{
+		PROF_BEGINF(P_SCALLOC);
 		cache = D_SCAlloc (r_drawsurf.surfwidth,
 						   r_drawsurf.surfwidth * r_drawsurf.surfheight);
+		PROF_ENDF(P_SCALLOC);
 		surface->cachespots[miplevel] = cache;
 		cache->owner = &surface->cachespots[miplevel];
 		cache->mipscale = surfscale;
 	}
 	
+#ifdef PD_FAST_SURFACES
+	cache->dlight = (surface->dlightframe == r_framecount) && R_DlightAffects (surface);
+#else
 	if (surface->dlightframe == r_framecount)
 		cache->dlight = 1;
 	else
 		cache->dlight = 0;
+#endif
 
 	r_drawsurf.surfdat = (pixel_t *)cache->data;
 	

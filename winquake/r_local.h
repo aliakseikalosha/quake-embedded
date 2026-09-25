@@ -131,12 +131,25 @@ extern	vec3_t			r_worldmodelorg;
 
 void R_DrawSprite (void);
 void R_RenderFace (msurface_t *fa, int clipflags);
+#ifdef PD_FAST_FACES
+typedef struct
+{
+	edge_t		*edge_p;
+	surf_t		*surface_p;
+	int			currentkey;
+	int			polycount;
+} rworld_t;
+void R_RenderFaceW (rworld_t *w, msurface_t *fa, int clipflags);
+#endif
 void R_RenderPoly (msurface_t *fa, int clipflags);
 void R_RenderBmodelFace (bedge_t *pedges, msurface_t *psurf);
 void R_TransformPlane (mplane_t *p, float *normal, float *dist);
 void R_TransformFrustum (void);
 void R_SetSkyFrame (void);
 void R_DrawSurfaceBlock16 (void);
+#ifdef PD_FAST_SURFACES
+qboolean R_DlightAffects (msurface_t *surf);
+#endif
 void R_DrawSurfaceBlock8 (void);
 texture_t *R_TextureAnimation (texture_t *base);
 
@@ -297,6 +310,7 @@ void R_PrintTimes (void);
 void R_PrintDSpeeds (void);
 void R_AnimateLight (void);
 int R_LightPoint (vec3_t p);
+void R_LightPointFlush (void);
 void R_SetupFrame (void);
 void R_cshift_f (void);
 void R_EmitEdge (mvertex_t *pv0, mvertex_t *pv1);

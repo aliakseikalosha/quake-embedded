@@ -19,6 +19,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 */
 
 #include "quakedef.h"
+#include "pdprof.h"
 
 
 /*
@@ -358,6 +359,9 @@ int PR_LeaveFunction (void)
 PR_ExecuteProgram
 ====================
 */
+#ifdef PD_PROFILE_FINE
+#define PR_ExecuteProgram PR_ExecuteProgram_inner
+#endif
 void PR_ExecuteProgram (func_t fnum)
 {
 	eval_t	*a, *b, *c;
@@ -370,6 +374,7 @@ void PR_ExecuteProgram (func_t fnum)
 	int		exitdepth;
 	eval_t	*ptr;
 
+	PROF_STK(K_QC);
 	if (!fnum || fnum >= progs->numfunctions)
 	{
 		if (pr_global_struct->self)
@@ -390,6 +395,7 @@ void PR_ExecuteProgram (func_t fnum)
 while (1)
 {
 	s++;	// next statement
+	PROF_CNTF(C_QCOPS, 1);
 
 	st = &pr_statements[s];
 	a = (eval_t *)&pr_globals[st->a];
@@ -628,7 +634,16 @@ while (1)
 			i = -newf->first_statement;
 			if (i >= pr_numbuiltins)
 				PR_RunError ("Bad builtin call number");
+#ifdef PD_PROFILE_FINE
+			{
+				uint32_t bt0 = PROF_CYC();
+
+				pr_builtins[i] ();
+				pdprof_bi_add (i, PROF_CYC() - bt0);
+			}
+#else
 			pr_builtins[i] ();
+#endif
 			break;
 		}
 
@@ -662,3 +677,20 @@ while (1)
 }
 
 }
+
+#ifdef PD_PROFILE_FINE
+#undef PR_ExecuteProgram
+void PR_ExecuteProgram (func_t fnum)
+{
+	static int nest;
+
+	if (!nest++)
+	{
+		PROF_BEGINF(P_QC);
+		PROF_CNTF(C_QCCALLS, 1);
+	}
+	PR_ExecuteProgram_inner (fnum);
+	if (!--nest)
+		PROF_ENDF(P_QC);
+}
+#endif

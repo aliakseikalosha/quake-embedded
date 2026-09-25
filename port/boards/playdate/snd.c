@@ -240,6 +240,18 @@ sfx_t *S_PrecacheSound(char *sample)
 	return &e->sfx;
 }
 
+/*
+ * Called once the level's sounds are registered. Decoding a sample reads it
+ * from the pak, so doing it on first use stalls the frame that fires the
+ * weapon or wakes a monster. Load what fits now, while the level loads, and
+ * stay under the budget so trim_cache never evicts what was just decoded.
+ */
+void S_EndPrecaching(void)
+{
+	for (int i = 0; i < num_entries && pcm_bytes < PCM_BUDGET * 2 / 3; i++)
+		load(&entries[i]);
+}
+
 static snd_voice_t *pick_voice(int entnum, int entchannel)
 {
 	snd_voice_t *oldest = &voices[0];
@@ -354,5 +366,4 @@ void S_TouchSound(char *sample) {}
 void S_ClearBuffer(void) {}
 void S_ClearPrecache(void) {}
 void S_BeginPrecaching(void) {}
-void S_EndPrecaching(void) {}
 void S_ExtraUpdate(void) {}

@@ -20,6 +20,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 // screen.c -- master for refresh, status bar, console, chat, notify, etc
 
 #include "quakedef.h"
+#include "pdprof.h"
 #include "r_local.h"
 
 // only the refresh window will be updated unless these variables are flagged 
@@ -64,7 +65,13 @@ qboolean	block_drawing;
 #define SHOW_FPS 1
 
 #ifdef SHOW_FPS
-static float	scr_frame_dt;
+// port: off by default; the measurement and text are only refreshed twice a
+// second, so leaving it off costs nothing and turning it on stays cheap
+cvar_t	scr_showfps = {"scr_showfps", "0"};
+static char		scr_fps_str[16];
+static int		scr_fps_frames;
+static double	scr_fps_start;
+static qboolean	scr_fps_active;
 #endif
 
 /*
@@ -201,17 +208,12 @@ static void SCR_DrawFPS ()
 	char	*start;
 	char	*end;
 	int	x, y;
-	float	fps;
-	char	fps_str[16];
 
-	// Calculate the FPS
-	fps = 1.0F / scr_frame_dt;
-
-	snprintf (&fps_str[0], sizeof(fps_str), "%.1f", (double)fps);
-	fps_str[sizeof(fps_str)-1] = 0;
+	if (!scr_fps_str[0])
+		return;
 
 	// FPS is rendered from right to left, starting at the end of the string.
-	start = &fps_str[0];
+	start = &scr_fps_str[0];
 	end = start;
 	while (*end != 0)
 		++end;
@@ -226,6 +228,37 @@ static void SCR_DrawFPS ()
 			x -= 8;
 		} while (end != start);
 	}
+}
+
+/*
+====================
+SCR_UpdateFPS
+
+Called once per frame while the counter is shown.
+====================
+*/
+static void SCR_UpdateFPS (void)
+{
+	double	t = Sys_FloatTime ();
+	int		tenths;
+
+	if (!scr_fps_active)
+	{
+		scr_fps_active = true;
+		scr_fps_start = t;
+		scr_fps_frames = 0;
+		scr_fps_str[0] = 0;
+		return;
+	}
+
+	scr_fps_frames++;
+	if (t - scr_fps_start < 0.5)
+		return;
+
+	tenths = (int)((float)scr_fps_frames / (float)(t - scr_fps_start) * 10.0f + 0.5f);
+	snprintf (scr_fps_str, sizeof(scr_fps_str), "%d.%d", tenths / 10, tenths % 10);
+	scr_fps_frames = 0;
+	scr_fps_start = t;
 }
 #endif
 
@@ -364,6 +397,9 @@ void SCR_Init (void)
 	Cvar_RegisterVariable (&scr_showpause);
 	Cvar_RegisterVariable (&scr_centertime);
 	Cvar_RegisterVariable (&scr_printspeed);
+#ifdef SHOW_FPS
+	Cvar_RegisterVariable (&scr_showfps);
+#endif
 
 //
 // register our commands
@@ -710,10 +746,6 @@ void SCR_UpdateScreen (void)
 {
 	static float	oldscr_viewsize;
 	static float	oldlcd_x;
-#ifdef SHOW_FPS	
-	static double	oldscr_t;
-	double		t;
-#endif
 	vrect_t		vrect;
 	
 	if (scr_skipupdate || block_drawing)
@@ -743,10 +775,10 @@ void SCR_UpdateScreen (void)
 	}
 
 #ifdef SHOW_FPS
-// Keep track of frame time (for FPS display)
-	t = Sys_FloatTime ();
-	scr_frame_dt = (float)(t - oldscr_t);
-	oldscr_t = t;
+	if (scr_showfps.value)
+		SCR_UpdateFPS ();
+	else
+		scr_fps_active = false;
 #endif
 
 //
@@ -799,6 +831,7 @@ void SCR_UpdateScreen (void)
 	V_RenderView ();
 
 	VID_UnlockBuffer ();
+	PROF_BEGIN(P_HUD);
 
 	D_EnableBackBufferAccess ();	// of all overlay stuff if drawing directly
 
@@ -836,13 +869,18 @@ void SCR_UpdateScreen (void)
 		SCR_CheckDrawCenterString ();
 		Sbar_Draw ();
 		SCR_DrawConsole ();
-#ifdef SHOW_FPS		
-		SCR_DrawFPS ();
+#ifdef SHOW_FPS
+		if (scr_showfps.value)
+			SCR_DrawFPS ();
 #endif
 		M_Draw ();
 	}
 
+	PROF_END(P_HUD);
+	PROF_BEGIN(P_PAL);
 	V_UpdatePalette ();
+	PROF_END(P_PAL);
+	PROF_BEGIN(P_VID);
 
 //
 // update one of three areas
@@ -878,6 +916,7 @@ void SCR_UpdateScreen (void)
 	
 		VID_Update (&vrect);
 	}
+	PROF_END(P_VID);
 }
 
 

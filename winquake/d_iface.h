@@ -136,6 +136,7 @@ extern int		r_pixbytes;
 extern qboolean	r_dowarp;
 extern qboolean	r_dosinewarp;
 void D_UpscaleScreen (void);
+void D_LowresEndFrame (void);
 
 extern affinetridesc_t	r_affinetridesc;
 extern spritedesc_t		r_spritedesc;

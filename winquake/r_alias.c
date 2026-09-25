@@ -21,6 +21,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "quakedef.h"
 #include "r_local.h"
+#include "pdprof.h"
 #include "d_local.h"	// FIXME: shouldn't be needed (is needed for patch
 						// right now, but that should move)
 
@@ -44,6 +45,14 @@ finalvert_t			*pfinalverts;
 auxvert_t			*pauxverts;
 static float		ziscale;
 static model_t		*pmodel;
+
+#ifdef PD_FAST_ALIAS
+static trivertx_t	*r_apverts_base;	// first vertex of the frame being drawn (R_AliasPreparePoints advances r_apverts)
+#endif
+
+#ifdef PD_FAST_ALIAS
+static entity_t		*alias_xform_ent;	// entity whose unscaled transform is in aliastransform (see R_AliasSetUpTransform)
+#endif
 
 static vec3_t		alias_forward, alias_right, alias_up;
 
@@ -105,6 +114,9 @@ qboolean R_AliasCheckBBox (void)
 	pahdr = Mod_Extradata (pmodel);
 	pmdl = (mdl_t *)((byte *)pahdr + pahdr->model);
 
+#ifdef PD_FAST_ALIAS
+	alias_xform_ent = NULL;		// always build it here; R_AliasDrawModel may reuse the result
+#endif
 	R_AliasSetUpTransform (0);
 
 // construct the base bounding box for this frame
@@ -279,6 +291,78 @@ void R_AliasPreparePoints (void)
  	fv = pfinalverts;
 	av = pauxverts;
 
+#ifdef PD_FAST_ALIAS
+/*
+Same arithmetic as R_AliasTransformFinalVert + R_AliasProjectFinalVert, but everything is worked
+out in locals and each vertex is stored once, in ascending order: the original alternated between
+the aux vertex and the final vertex (two lines of slow memory) for three separate runs of stores
+per vertex. The aux vertices are only needed by R_AliasClipTriangle for triangles that touch the
+near plane, which recomputes them (R_AliasAuxVert); as before, z-clipped vertices get no
+u, v or 1/z.
+*/
+	r_apverts_base = r_apverts;
+	{
+		trivertx_t	*pv = r_apverts;
+
+		for (i=0 ; i<r_anumverts ; i++, fv++, pv++, pstverts++)
+		{
+			float	ax, ay, az, lightcos;
+			int		temp, flags;
+
+			ax = DotProduct(pv->v, aliastransform[0]) + aliastransform[0][3];
+			ay = DotProduct(pv->v, aliastransform[1]) + aliastransform[1][3];
+			az = DotProduct(pv->v, aliastransform[2]) + aliastransform[2][3];
+
+		// lighting
+			lightcos = DotProduct (r_avertexnormals[pv->lightnormalindex], r_plightvec);
+			temp = r_ambientlight;
+
+			if (lightcos < 0)
+			{
+				temp += (int)(r_shadelight * lightcos);
+
+			// clamp; because we limited the minimum ambient and shading light, we
+			// don't have to clamp low light, just bright
+				if (temp < 0)
+					temp = 0;
+			}
+
+			flags = pstverts->onseam;
+
+			if (az < ALIAS_Z_CLIP_PLANE)
+			{
+				fv->v[2] = pstverts->s;
+				fv->v[3] = pstverts->t;
+				fv->v[4] = temp;
+				fv->flags = flags | ALIAS_Z_CLIP;
+			}
+			else
+			{
+				float	zi = 1.0f / az;
+				int		u = (ax * aliasxscale * zi) + aliasxcenter;
+				int		v = (ay * aliasyscale * zi) + aliasycenter;
+
+				if (u < r_refdef.aliasvrect.x)
+					flags |= ALIAS_LEFT_CLIP;
+				if (v < r_refdef.aliasvrect.y)
+					flags |= ALIAS_TOP_CLIP;
+				if (u > r_refdef.aliasvrectright)
+					flags |= ALIAS_RIGHT_CLIP;
+				if (v > r_refdef.aliasvrectbottom)
+					flags |= ALIAS_BOTTOM_CLIP;
+
+				fv->v[0] = u;
+				fv->v[1] = v;
+				fv->v[2] = pstverts->s;
+				fv->v[3] = pstverts->t;
+				fv->v[4] = temp;
+				fv->v[5] = zi * ziscale;
+				fv->flags = flags;
+			}
+		}
+		r_apverts = pv;		// as the original loop leaves it
+	}
+#else
 	for (i=0 ; i<r_anumverts ; i++, fv++, av++, r_apverts++, pstverts++)
 	{
 		R_AliasTransformFinalVert (fv, av, r_apverts, pstverts);
@@ -298,6 +382,7 @@ void R_AliasPreparePoints (void)
 				fv->flags |= ALIAS_BOTTOM_CLIP;	
 		}
 	}
+#endif
 
 //
 // clip and draw all triangles
@@ -334,13 +419,31 @@ void R_AliasPreparePoints (void)
 R_AliasSetUpTransform
 ================
 */
+#ifdef PD_FAST_ALIAS
+/*
+R_AliasCheckBBox and, for the entities it lets through, R_AliasDrawModel both build the entity's
+transform, and the second build comes out exactly the same as the first. Keep the unscaled result
+of the first for the entity that is still current and only apply the scaling the second one adds.
+*/
+#endif
+
 void R_AliasSetUpTransform (int trivial_accept)
 {
 	int				i;
 	float			rotationmatrix[3][4], t2matrix[3][4];
+#ifdef PD_FAST_ALIAS
+// scratch on the stack (fast RAM): as statics these were ~20 scattered stores to slow memory a call
+	float			tmatrix[3][4] = {{0}}, viewmatrix[3][4] = {{0}};
+#else
 	static float	tmatrix[3][4];
 	static float	viewmatrix[3][4];
+#endif
 	vec3_t			angles;
+
+#ifdef PD_FAST_ALIAS
+	if (alias_xform_ent == currententity)
+		goto scaling;
+#endif
 
 // TODO: should really be stored with the entity instead of being reconstructed
 // TODO: should use a look-up table
@@ -387,6 +490,10 @@ void R_AliasSetUpTransform (int trivial_accept)
 
 	R_ConcatTransforms (viewmatrix, rotationmatrix, aliastransform);
 
+#ifdef PD_FAST_ALIAS
+	alias_xform_ent = currententity;
+scaling:
+#endif
 // do the scaling up of x and y to screen coordinates as part of the transform
 // for the unclipped case (it would mess up clipping in the clipped case).
 // Also scale down z, so 1/z is scaled 31 bits for free, and scale down x and y
@@ -403,6 +510,9 @@ void R_AliasSetUpTransform (int trivial_accept)
 			aliastransform[2][i] *= 1.0f / ((float)0x8000 * 0x10000);
 
 		}
+#ifdef PD_FAST_ALIAS
+		alias_xform_ent = NULL;		// aliastransform is scaled now
+#endif
 	}
 }
 
@@ -500,6 +610,21 @@ void R_AliasTransformAndProjectFinalVerts (finalvert_t *fv, stvert_t *pstverts)
 	}
 }
 
+#ifdef PD_FAST_ALIAS
+// the aux (view space) vertex that R_AliasTransformFinalVert would have stored for vertex "index"
+void R_AliasAuxVert (int index, auxvert_t *out)
+{
+	trivertx_t	*pverts = r_apverts_base + index;
+
+	out->fv[0] = DotProduct(pverts->v, aliastransform[0]) +
+			aliastransform[0][3];
+	out->fv[1] = DotProduct(pverts->v, aliastransform[1]) +
+			aliastransform[1][3];
+	out->fv[2] = DotProduct(pverts->v, aliastransform[2]) +
+			aliastransform[2][3];
+}
+#endif
+
 /*
 ================
 R_AliasProjectFinalVert
@@ -534,17 +659,23 @@ void R_AliasPrepareUnclippedPoints (void)
 // FIXME: just use pfinalverts directly?
 	fv = pfinalverts;
 
+	PROF_BEGINF(P_ATRANS);
 	R_AliasTransformAndProjectFinalVerts (fv, pstverts);
 
 	if (r_affinetridesc.drawtype)
 		D_PolysetDrawFinalVerts (fv, r_anumverts);
+	PROF_ENDF(P_ATRANS);
 
 	r_affinetridesc.pfinalverts = pfinalverts;
 	r_affinetridesc.ptriangles = (mtriangle_t *)
 			((byte *)paliashdr + paliashdr->triangles);
 	r_affinetridesc.numtriangles = pmdl->numtris;
 
+	PROF_BEGINF(P_APOLY);
 	D_PolysetDraw ();
+	PROF_ENDF(P_APOLY);
+	PROF_CNTF(C_AVERTS, r_anumverts);
+	PROF_CNTF(C_ATRIS, pmdl->numtris);
 }
 
 /*
@@ -701,6 +832,9 @@ void R_AliasDrawModel (alight_t *plighting)
 	static auxvert_t	auxverts[MAXALIASVERTS];
 
 	r_amodels_drawn++;
+	PROF_STK(K_ALIAS);
+	PROF_BEGINF(P_ALIAS);
+	PROF_CNTF(C_AMODELS, 1);
 
 // cache align
 	pfinalverts = (finalvert_t *)
@@ -737,5 +871,9 @@ void R_AliasDrawModel (alight_t *plighting)
 		R_AliasPrepareUnclippedPoints ();
 	else
 		R_AliasPreparePoints ();
+#ifdef PD_FAST_ALIAS
+	alias_xform_ent = NULL;
+#endif
+	PROF_ENDF(P_ALIAS);
 }
 

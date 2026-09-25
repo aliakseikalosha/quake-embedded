@@ -36,5 +36,16 @@ void Draw_TileClear (int x, int y, int w, int h);
 void Draw_Fill (int x, int y, int w, int h, int c);
 void Draw_FadeScreen (void);
 void Draw_String (int x, int y, char *str);
+
+#ifdef PD_LOWRES_3D
+// The low-res 3D view is only expanded into the vid buffer for the rows that
+// something is about to draw over (see D_UpscaleScreen); every primitive that
+// writes vid.buffer calls this first with the rows it will touch.
+extern	int		qembd_lowres_active;
+void D_LowresTouch (int y0, int y1);
+#define DRAW_TOUCH(y, h)	do { if (qembd_lowres_active) D_LowresTouch ((y), (y) + (h)); } while (0)
+#else
+#define DRAW_TOUCH(y, h)	((void)0)
+#endif
 qpic_t *Draw_PicFromWad (char *name);
 qpic_t *Draw_CachePic (char *path);

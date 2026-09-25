@@ -21,6 +21,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "quakedef.h"
 #include "r_local.h"
+#include "pdprof.h"
 
 int	r_dlightframecount;
 
@@ -139,6 +140,197 @@ LIGHT SAMPLING
 =============================================================================
 */
 
+#ifdef PD_FAST_ALIAS
+/*
+R_LightPoint walks the world BSP from the top down to the entity's feet: ~30 nodes and their
+planes, then the surfaces of the node the ray crosses, each a few cache lines that are cold by
+the time an entity is drawn (about 200 us per call on the Playdate). What that walk finds -- the
+surface and the lightmap texel -- depends only on the point, so it is remembered per exact point;
+the light itself (which depends on the light styles) is recomputed from it every time.
+*/
+typedef struct
+{
+	const msurface_t	*surf;		// NULL = the ray hit nothing
+	int					ds, dt;
+} lighthit_t;
+
+static int LightFromHit (const lighthit_t *hit)
+{
+	const msurface_t *surf = hit->surf;
+	const byte *lightmap;
+	int maps, lightlevel, ds, dt;
+
+	if (!surf)
+		return -1;
+	if (!surf->samples)
+		return 0;
+
+	ds = hit->ds >> 4;
+	dt = hit->dt >> 4;
+
+	/* FIXME: does this account properly for dynamic lights? e.g. rocket */
+	lightlevel = 0;
+	lightmap = surf->samples + dt * ((surf->extents[0] >> 4) + 1) + ds;
+	foreach_surf_lightstyle(surf, maps) {
+		const short *size = surf->extents;
+		const int surfbytes = ((size[0] >> 4) + 1) * ((size[1] >> 4) + 1);
+
+		lightlevel += *lightmap * d_lightstylevalue[surf->styles[maps]];
+		lightmap += surfbytes;
+	}
+
+	return lightlevel >> 8;
+}
+
+// returns true if something was hit
+static qboolean RecursiveLightHit (mnode_t *node, vec3_t start, vec3_t end, lighthit_t *hit)
+{
+	const mplane_t *plane;
+	float		front, back, frac;
+	vec3_t		mid;
+	int side;
+
+	const msurface_t *surf;
+	const mtexinfo_t *tex;
+	int			i;
+
+restart:
+	if (node->contents < 0)
+		return false;		// didn't hit anything
+
+// calculate mid point
+
+// FIXME: optimize for axial
+	plane = node->plane;
+	front = DotProduct (start, plane->normal) - plane->dist;
+	back = DotProduct (end, plane->normal) - plane->dist;
+	side = front < 0;
+
+	if ( (back < 0) == side) {
+		/* Completely on one side - tail recursion optimization */
+		node = node->children[side];
+		goto restart;
+	}
+
+	frac = front / (front-back);
+	mid[0] = start[0] + (end[0] - start[0])*frac;
+	mid[1] = start[1] + (end[1] - start[1])*frac;
+	mid[2] = start[2] + (end[2] - start[2])*frac;
+
+// go down front side
+	if (RecursiveLightHit(node->children[side], start, mid, hit))
+		return true;		/* hit something */
+
+	if ( (back < 0) == side )
+		return false;		// didn't hit anuthing
+
+// check for impact on this node
+
+	surf = cl.worldmodel->surfaces + node->firstsurface;
+	for (i=0 ; i<node->numsurfaces ; i++, surf++)
+	{
+		int s, t, ds, dt;
+
+		if (surf->flags & SURF_DRAWTILED)
+			continue;	// no lightmaps
+
+		tex = surf->texinfo;
+
+		s = DotProduct (mid, tex->vecs[0]) + tex->vecs[0][3];
+		t = DotProduct (mid, tex->vecs[1]) + tex->vecs[1][3];;
+
+		if (s < surf->texturemins[0] ||
+		t < surf->texturemins[1])
+			continue;
+
+		ds = s - surf->texturemins[0];
+		dt = t - surf->texturemins[1];
+
+		if ( ds > surf->extents[0] || dt > surf->extents[1] )
+			continue;
+
+		hit->surf = surf;
+		hit->ds = ds;
+		hit->dt = dt;
+		return true;
+	}
+
+// go down back side
+	return RecursiveLightHit (node->children[!side], mid, end, hit);
+}
+
+#define LPCACHE	16
+static struct
+{
+	float		org[3];
+	lighthit_t	hit;
+	qboolean	valid;
+} lpcache[LPCACHE];
+static int lpcache_next;
+
+void R_LightPointFlush (void)
+{
+	int		i;
+
+	for (i=0 ; i<LPCACHE ; i++)
+		lpcache[i].valid = false;
+}
+
+int R_LightPoint (vec3_t p)
+{
+	vec3_t		end;
+	lighthit_t	hit;
+	int lightlevel, i;
+
+	if (!cl.worldmodel->lightdata)
+		return 255;
+
+	PROF_BEGINF(P_LPT);
+	PROF_CNTF(C_LPQ, 1);
+	for (i=0 ; i<LPCACHE ; i++)
+	{
+		if (lpcache[i].valid && lpcache[i].org[0] == p[0] && lpcache[i].org[1] == p[1] &&
+				lpcache[i].org[2] == p[2])
+			break;
+	}
+
+	if (i < LPCACHE)
+	{
+		PROF_CNTF(C_LPHIT, 1);
+		hit = lpcache[i].hit;
+	}
+	else
+	{
+		end[0] = p[0];
+		end[1] = p[1];
+		end[2] = p[2] - 2048;
+
+		hit.surf = NULL;
+		RecursiveLightHit (cl.worldmodel->nodes, p, end, &hit);
+
+		i = lpcache_next;
+		lpcache_next = (lpcache_next + 1) % LPCACHE;
+		lpcache[i].org[0] = p[0];
+		lpcache[i].org[1] = p[1];
+		lpcache[i].org[2] = p[2];
+		lpcache[i].hit = hit;
+		lpcache[i].valid = true;
+	}
+
+	lightlevel = LightFromHit (&hit);
+	PROF_ENDF(P_LPT);
+
+	if (lightlevel == -1)
+		lightlevel = 0;
+
+	if (lightlevel < r_refdef.ambientlight)
+		lightlevel = r_refdef.ambientlight;
+
+	return lightlevel;
+}
+
+#else	// !PD_FAST_ALIAS
+
 int RecursiveLightPoint (mnode_t *node, vec3_t start, vec3_t end)
 {
 	const mplane_t *plane;
@@ -152,6 +344,7 @@ int RecursiveLightPoint (mnode_t *node, vec3_t start, vec3_t end)
 	int maps, lightlevel;
 	int			i;
 
+	PROF_STK(K_LIGHT);
 restart:
 	if (node->contents < 0)
 		return -1;		// didn't hit anything
@@ -244,7 +437,9 @@ int R_LightPoint (vec3_t p)
 	end[1] = p[1];
 	end[2] = p[2] - 2048;
 	
+	PROF_BEGINF(P_LPT);
 	lightlevel = RecursiveLightPoint(cl.worldmodel->nodes, p, end);
+	PROF_ENDF(P_LPT);
 
 	if (lightlevel == -1)
 		lightlevel = 0;
@@ -255,3 +450,4 @@ int R_LightPoint (vec3_t p)
 	return lightlevel;
 }
 
+#endif	// PD_FAST_ALIAS

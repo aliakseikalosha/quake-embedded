@@ -21,6 +21,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "quakedef.h"
 #include "r_local.h"
+#include "pdprof.h"
 
 //define	PASSAGES
 
@@ -249,6 +250,9 @@ void R_NewMap (void)
 		 	
 	r_viewleaf = NULL;
 	R_ClearParticles ();
+#ifdef PD_FAST_ALIAS
+	R_LightPointFlush ();
+#endif
 
 	r_cnumsurfs = qclamp((int)r_maxsurfs.value, MINSURFACES, MAXSURFACES);
 
@@ -544,7 +548,10 @@ void R_DrawEntitiesOnList (void)
 
 		// see if the bounding box lets us trivially reject, also sets
 		// trivial accept status
-			if (R_AliasCheckBBox ())
+			PROF_BEGINF(P_ABBOX);
+			j = R_AliasCheckBBox ();
+			PROF_ENDF(P_ABBOX);
+			if (j)
 			{
 				j = R_LightPoint (currententity->origin);
 	
@@ -895,7 +902,9 @@ void R_EdgeDrawing (void)
 		rw_time1 = Sys_FloatTime ();
 	}
 
+	PROF_BEGIN(P_WORLD);
 	R_RenderWorld ();
+	PROF_END(P_WORLD);
 
 	if (r_drawculledpolys)
 		R_ScanEdges ();
@@ -910,7 +919,9 @@ void R_EdgeDrawing (void)
 		db_time1 = rw_time2;
 	}
 
+	PROF_BEGIN(P_BENT);
 	R_DrawBEntitiesOnList ();
+	PROF_END(P_BENT);
 
 	if (r_dspeeds.value)
 	{
@@ -925,8 +936,10 @@ void R_EdgeDrawing (void)
 		VID_LockBuffer ();
 	}
 	
+	PROF_BEGIN(P_SCAN);
 	if (!(r_drawpolys | r_drawculledpolys))
 		R_ScanEdges ();
+	PROF_END(P_SCAN);
 }
 
 
@@ -946,6 +959,7 @@ void R_RenderView_ (void)
 	if (r_timegraph.value || r_speeds.value || r_dspeeds.value)
 		r_time1 = Sys_FloatTime ();
 
+	PROF_BEGIN(P_SETUP);
 	R_SetupFrame ();
 
 #ifdef PASSAGES
@@ -953,6 +967,7 @@ SetVisibilityByPassages ();
 #else
 	R_MarkLeaves ();	// done here so we know if we're in water
 #endif
+	PROF_END(P_SETUP);
 
 // make FDIV fast. This reduces timing precision after we've been running for a
 // while, so we don't do it globally.  This also sets chop mode, and we do it
@@ -985,7 +1000,9 @@ SetVisibilityByPassages ();
 		de_time1 = se_time2;
 	}
 
+	PROF_BEGIN(P_ENT);
 	R_DrawEntitiesOnList ();
+	PROF_END(P_ENT);
 
 	if (r_dspeeds.value)
 	{
@@ -993,7 +1010,9 @@ SetVisibilityByPassages ();
 		dv_time1 = de_time2;
 	}
 
+	PROF_BEGIN(P_VIEW);
 	R_DrawViewModel ();
+	PROF_END(P_VIEW);
 
 	if (r_dspeeds.value)
 	{
@@ -1001,11 +1020,14 @@ SetVisibilityByPassages ();
 		dp_time1 = Sys_FloatTime ();
 	}
 
+	PROF_BEGIN(P_PART);
 	R_DrawParticles ();
+	PROF_END(P_PART);
 
 	if (r_dspeeds.value)
 		dp_time2 = Sys_FloatTime ();
 
+	PROF_BEGIN(P_UPSCALE);
 	if (r_dowarp)
 	{
 #ifdef PD_LOWRES_3D
@@ -1018,6 +1040,7 @@ SetVisibilityByPassages ();
 #endif
 	}
 
+	PROF_END(P_UPSCALE);
 	V_SetContentsColor (r_viewleaf->contents);
 
 	if (r_timegraph.value)

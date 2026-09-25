@@ -21,6 +21,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "quakedef.h"
 #include "d_local.h"
+#include "pdprof.h"
 
 static int	miplevel;
 
@@ -34,6 +35,10 @@ extern void			R_RotateBmodel (void);
 extern void			R_TransformFrustum (void);
 
 vec3_t		transformed_modelorg;
+
+#ifdef PD_FAST_EDGES
+extern espan_t	**r_spanheads;
+#endif
 
 /*
 ==============
@@ -175,7 +180,9 @@ void D_DrawSurfaces (void)
 	surfcache_t		*pcurrentcache;
 	vec3_t			world_transformed_modelorg;
 	vec3_t			local_modelorg;
+	PROF_STK(K_DSURF);
 
+	PROF_BEGINF(P_DSURF);
 	currententity = &cl_entities[0];
 	TransformVector (modelorg, transformed_modelorg);
 	VectorCopy (transformed_modelorg, world_transformed_modelorg);
@@ -185,6 +192,10 @@ void D_DrawSurfaces (void)
 	{
 		for (s = &surfaces[1] ; s<surface_p ; s++)
 		{
+#ifdef PD_FAST_EDGES
+			if (r_spanheads)
+				s->spans = r_spanheads[s - surfaces];
+#endif
 			if (!s->spans)
 				continue;
 
@@ -200,6 +211,17 @@ void D_DrawSurfaces (void)
 	{
 		for (s = &surfaces[1] ; s<surface_p ; s++)
 		{
+#ifdef PD_FAST_EDGES
+		// the scan keeps the span list heads on its stack (see FE_EMIT in r_edge.c)
+			if (r_spanheads)
+			{
+				espan_t		*head = r_spanheads[s - surfaces];
+
+				if (!head)
+					continue;
+				s->spans = head;
+			}
+#endif
 			if (!s->spans)
 				continue;
 
@@ -216,7 +238,9 @@ void D_DrawSurfaces (void)
 					R_MakeSky ();
 				}
 
+				PROF_BEGINF(P_OTHER);
 				D_DrawSkyScans8 (s->spans);
+				PROF_ENDF(P_OTHER);
 				D_DrawZSpans (s->spans);
 			}
 			else if (s->flags & SURF_DRAWBACKGROUND)
@@ -227,7 +251,9 @@ void D_DrawSurfaces (void)
 				d_zistepv = 0;
 				d_ziorigin = -0.9F;
 
+				PROF_BEGINF(P_OTHER);
 				D_DrawSolidSurface (s, (int)r_clearcolor.value & 0xFF);
+				PROF_ENDF(P_OTHER);
 				D_DrawZSpans (s->spans);
 			}
 			else if (s->flags & SURF_DRAWTURB)
@@ -253,8 +279,12 @@ void D_DrawSurfaces (void)
 										// make entity passed in
 				}
 
+				PROF_BEGINF(P_GRAD);
 				D_CalcGradients (pface);
+				PROF_ENDF(P_GRAD);
+				PROF_BEGINF(P_OTHER);
 				Turbulent8 (s->spans);
+				PROF_ENDF(P_OTHER);
 				D_DrawZSpans (s->spans);
 
 				if (s->insubmodel)
@@ -294,14 +324,21 @@ void D_DrawSurfaces (void)
 				* pface->texinfo->mipadjust);
 
 			// FIXME: make this passed in to D_CacheSurface
+				PROF_BEGINF(P_CACHE);
 				pcurrentcache = D_CacheSurface (pface, miplevel);
+				PROF_ENDF(P_CACHE);
 
 				cacheblock = (pixel_t *)pcurrentcache->data;
 				cachewidth = pcurrentcache->width;
 
+				PROF_BEGINF(P_GRAD);
 				D_CalcGradients (pface);
+				PROF_ENDF(P_GRAD);
 
+				PROF_BEGINF(P_SPANS);
 				(*d_drawspans) (s->spans);
+				PROF_ENDF(P_SPANS);
+				PROF_SPANSF (s->spans);
 
 				D_DrawZSpans (s->spans);
 
@@ -324,5 +361,6 @@ void D_DrawSurfaces (void)
 			}
 		}
 	}
+	PROF_ENDF(P_DSURF);
 }
 

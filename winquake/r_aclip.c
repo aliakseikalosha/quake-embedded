@@ -27,6 +27,9 @@ static finalvert_t		fv[2][8];
 static auxvert_t		av[8];
 
 void R_AliasProjectFinalVert (finalvert_t *fv, auxvert_t *av);
+#ifdef PD_FAST_ALIAS
+void R_AliasAuxVert (int index, auxvert_t *out);
+#endif
 void R_Alias_clip_top (finalvert_t *pfv0, finalvert_t *pfv1,
 	finalvert_t *out);
 void R_Alias_clip_bottom (finalvert_t *pfv0, finalvert_t *pfv1,
@@ -257,7 +260,11 @@ void R_AliasClipTriangle (mtriangle_t *ptri)
 	if (clipflags & ALIAS_Z_CLIP)
 	{
 		for (i=0 ; i<3 ; i++)
+#ifdef PD_FAST_ALIAS
+			R_AliasAuxVert (ptri->vertindex[i], &av[i]);
+#else
 			av[i] = pauxverts[ptri->vertindex[i]];
+#endif
 
 		k = R_AliasClip (fv[0], fv[1], ALIAS_Z_CLIP, 3, R_Alias_clip_z);
 		if (k == 0)

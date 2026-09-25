@@ -143,6 +143,8 @@ void Draw_Character (int x, int y, int num)
 	if (y <= -8)
 		return;			// totally off screen
 
+	DRAW_TOUCH (y, 8);
+
 #ifdef PARANOID
 	if (y > vid.height - 8 || x < 0 || x > vid.width - 8)
 		Sys_Error ("Con_DrawCharacter: (%i, %i)", x, y);
@@ -296,6 +298,8 @@ void Draw_Pic (int x, int y, qpic_t *pic)
 		Sys_Error ("Draw_Pic: bad coordinates");
 	}
 
+	DRAW_TOUCH (y, pic->height);
+
 	// Scale image to fit the screen width and height.
 	// This is a hack to make things (esp. the help pics) fit on screens with
 	// a resolution lower than 320x200.
@@ -393,6 +397,8 @@ void Draw_TransPic (int x, int y, qpic_t *pic)
 	{
 		Sys_Error ("Draw_TransPic: bad coordinates");
 	}
+
+	DRAW_TOUCH (y, pic->height);
 
 	// Scale image to fit the screen width and height.
 	// This is a hack to make things fit on screens with a resolution lower
@@ -525,6 +531,8 @@ void Draw_TransPicTranslate (int x, int y, qpic_t *pic, byte *translation)
 	{
 		Sys_Error ("Draw_TransPic: bad coordinates");
 	}
+
+	DRAW_TOUCH (y, pic->height);
 		
 	source = pic->data;
 
@@ -636,6 +644,8 @@ void Draw_ConsoleBackground (int lines)
 	char			ver[100];
 
 	conback = Draw_CachePic ("gfx/conback.lmp");
+
+	DRAW_TOUCH (0, lines);
 
 // hack the version number directly into the pic
 #ifdef _WIN32
@@ -833,6 +843,8 @@ void Draw_TileClear (int x, int y, int w, int h)
 	byte			*psrc;
 	vrect_t			vr;
 
+	DRAW_TOUCH (y, h);
+
 	r_rectdesc.rect.x = x;
 	r_rectdesc.rect.y = y;
 	r_rectdesc.rect.width = w;
@@ -906,6 +918,8 @@ void Draw_Fill (int x, int y, int w, int h, int c)
 	unsigned		uc;
 	int				u, v;
 
+	DRAW_TOUCH (y, h);
+
 	if (r_pixbytes == 1)
 	{
 		dest = vid.buffer + y*vid.rowbytes + x;
@@ -935,6 +949,8 @@ void Draw_FadeScreen (void)
 {
 	int			x,y;
 	byte		*pbuf;
+
+	DRAW_TOUCH (0, vid.height);
 
 	VID_UnlockBuffer ();
 	S_ExtraUpdate ();

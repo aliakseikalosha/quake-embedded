@@ -21,6 +21,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 // texture (used for Alias models)
 
 #include "quakedef.h"
+#include "pdprof.h"
 #include "r_local.h"
 #include "d_local.h"
 
@@ -113,12 +114,14 @@ D_PolysetDraw
 */
 void D_PolysetDraw (void)
 {
+#ifndef PD_FAST_ALIAS
 	static spanpackage_t	spans[DPS_MAXSPANS + 1 +
 			((CACHE_SIZE - 1) / sizeof(spanpackage_t)) + 1];
 						// one extra because of cache line pretouching
 
 	a_spans = (spanpackage_t *)
 			(((uintptr_t)&spans[0] + CACHE_SIZE - 1) & ~(CACHE_SIZE - 1));
+#endif
 
 	if (r_affinetridesc.drawtype)
 	{
@@ -225,6 +228,7 @@ void D_DrawSubdiv (void)
 }
 
 
+#ifndef PD_FAST_ALIAS
 /*
 ================
 D_DrawNonSubdiv
@@ -291,6 +295,7 @@ void D_DrawNonSubdiv (void)
 		D_RasterizeAliasPolySmooth ();
 	}
 }
+#endif	// !PD_FAST_ALIAS
 
 
 /*
@@ -585,6 +590,445 @@ void InitGel (byte *palette)
 	}
 }
 #endif
+
+#ifdef PD_FAST_ALIAS
+/*
+==============================================================================
+
+Fused alias triangle rasterizer
+
+The original rasterizer scans the left edge of a triangle into an array of
+span packages (32 bytes per row, in a static buffer), then walks the right edge
+and draws each span; on top of that every triangle copies its vertices into
+r_p0..r_p2 and keeps its gradients and edge steppers in ~50 globals. On the
+Playdate every byte stored to a global costs ~26 ns, so that bookkeeping costs
+more than most of the pixels. This version steps the left and right edges
+together, row by row, with all state in locals (registers and the fast stack),
+and draws each span straight away. The arithmetic is exactly that of
+D_PolysetSetEdgeTable / D_PolysetCalcGradients / D_RasterizeAliasPolySmooth /
+D_PolysetDrawSpans8, so the pixels are identical.
+==============================================================================
+*/
+
+// which vertex (0..2 = p0..p2) each edge of the table runs from and to
+typedef struct
+{
+	signed char	numleft, left[3];
+	signed char	numright, right[3];
+} fedgetable_t;
+
+static const fedgetable_t fedgetables[12] = {
+	{1, {0, 2, -1}, 2, {0, 1, 2}},
+	{2, {1, 0, 2}, 1, {1, 2, -1}},
+	{1, {0, 2, -1}, 1, {1, 2, -1}},
+	{1, {1, 0, -1}, 2, {1, 2, 0}},
+	{2, {0, 2, 1}, 1, {0, 1, -1}},
+	{1, {2, 1, -1}, 1, {2, 0, -1}},
+	{1, {2, 1, -1}, 2, {2, 0, 1}},
+	{2, {2, 1, 0}, 1, {2, 0, -1}},
+	{1, {1, 0, -1}, 1, {1, 2, -1}},
+	{1, {2, 1, -1}, 1, {0, 1, -1}},
+	{1, {1, 0, -1}, 1, {2, 0, -1}},
+	{1, {0, 2, -1}, 1, {0, 1, -1}},
+};
+
+typedef struct
+{
+	byte	*pdest, *ptex;
+	short	*pz;
+	int		sfrac, tfrac, light, zi, aspancount;
+	int		errorterm, erroradjustup, erroradjustdown, ubasestep, countextrastep;
+	int		pdestbasestep, pdestextrastep, pzbasestep, pzextrastep;
+	int		ptexbasestep, ptexextrastep, sfracbasestep, sfracextrastep;
+	int		tfracbasestep, tfracextrastep, lightbasestep, lightextrastep;
+	int		zibasestep, ziextrastep;
+} fleft_t;
+
+typedef struct
+{
+	int		aspancount, errorterm, erroradjustup, erroradjustdown, ubasestep, countextrastep;
+} fright_t;
+
+typedef struct
+{
+	int		lstepx, lstepy, sstepx, sstepy, tstepx, tstepy, zistepx, zistepy;
+	int		skinwidth;
+	byte	*pskin;
+} fgrad_t;
+
+// start a left edge segment at vertex "top" and step it towards "bot" over "height" rows;
+// "first" is the top segment of the edge, whose fractions carry over from the vertex
+static inline void
+D_FastLeftSegment (fleft_t *l, const fgrad_t *g, int *top, int topS, int *bot,
+		int height, int rightTopU, qboolean first)
+{
+	int		working_lstepx, tm, tn;
+
+	l->aspancount = top[0] - rightTopU;
+	l->ptex = g->pskin + (topS >> 16) + (top[3] >> 16) * g->skinwidth;
+	l->sfrac = first ? (topS & 0xFFFF) : 0;
+	l->tfrac = first ? (top[3] & 0xFFFF) : 0;
+	l->light = top[4];
+	l->zi = top[5];
+	l->pdest = (byte *)d_viewbuffer + top[1] * screenwidth + top[0];
+	l->pz = d_pzbuffer + top[1] * d_zwidth + top[0];
+
+	if (height == 1)
+		return;
+
+	tm = bot[0] - top[0];
+	tn = bot[1] - top[1];
+	FloorDivMod (tm, tn, &l->ubasestep, &l->erroradjustup);
+	l->erroradjustdown = tn;
+	l->errorterm = -1;
+
+	l->pzbasestep = d_zwidth + l->ubasestep;
+	l->pzextrastep = l->pzbasestep + 1;
+	l->pdestbasestep = screenwidth + l->ubasestep;
+	l->pdestextrastep = l->pdestbasestep + 1;
+
+// for negative steps in x along left edge, bias toward overflow rather than
+// underflow (sort of turning the floor () we did in the gradient calcs into
+// ceil (), but plus a little bit)
+	if (l->ubasestep < 0)
+		working_lstepx = g->lstepx - 1;
+	else
+		working_lstepx = g->lstepx;
+
+	l->countextrastep = l->ubasestep + 1;
+	l->ptexbasestep = ((g->sstepy + g->sstepx * l->ubasestep) >> 16) +
+			((g->tstepy + g->tstepx * l->ubasestep) >> 16) * g->skinwidth;
+	l->sfracbasestep = (g->sstepy + g->sstepx * l->ubasestep) & 0xFFFF;
+	l->tfracbasestep = (g->tstepy + g->tstepx * l->ubasestep) & 0xFFFF;
+	l->lightbasestep = g->lstepy + working_lstepx * l->ubasestep;
+	l->zibasestep = g->zistepy + g->zistepx * l->ubasestep;
+
+	l->ptexextrastep = ((g->sstepy + g->sstepx * l->countextrastep) >> 16) +
+			((g->tstepy + g->tstepx * l->countextrastep) >> 16) * g->skinwidth;
+	l->sfracextrastep = (g->sstepy + g->sstepx * l->countextrastep) & 0xFFFF;
+	l->tfracextrastep = (g->tstepy + g->tstepx * l->countextrastep) & 0xFFFF;
+	l->lightextrastep = l->lightbasestep + working_lstepx;
+	l->ziextrastep = l->zibasestep + g->zistepx;
+}
+
+static inline void
+D_FastRightSegment (fright_t *r, int *top, int *bot, int startcount)
+{
+	int		tm = bot[0] - top[0];
+	int		tn = bot[1] - top[1];
+
+	r->errorterm = -1;
+	FloorDivMod (tm, tn, &r->ubasestep, &r->erroradjustup);
+	r->erroradjustdown = tn;
+	r->aspancount = startcount;
+	r->countextrastep = r->ubasestep + 1;
+}
+
+// pv[i] = u, v, s, t, l, 1/z of vertex i (s is passed separately: it may carry the seam fix-up)
+static void
+D_FastRasterizeTriangle (int *pv[3], const int sv[3], int xdenom)
+{
+	fgrad_t		g;
+	fleft_t		l;
+	fright_t	r;
+	const fedgetable_t	*et;
+	float		xstepdenominv, ystepdenominv, t0, t1;
+	float		p01_minus_p21, p11_minus_p21, p00_minus_p20, p10_minus_p20;
+	int			*ltop, *lbot, *rtop, *rbot;
+	int			lrem, rrem, lseg, rseg;
+	int			i, k;
+	byte		*cmap = (byte *)acolormap;
+	int			_r_zistepx, _r_lstepx, _a_ststepxwhole, _a_sstepxfrac, _a_tstepxfrac, _skinwidth;
+	int			edgetableindex;
+#ifdef PD_PROFILE_FINE
+	int			npix = 0;
+#endif
+	PROF_STK(K_POLY);
+
+// pick the edge table (see D_PolysetSetEdgeTable)
+	edgetableindex = 0;
+	if (pv[0][1] >= pv[1][1])
+	{
+		if (pv[0][1] == pv[1][1])
+		{
+			et = &fedgetables[(pv[0][1] < pv[2][1]) ? 2 : 5];
+			goto have_table;
+		}
+		edgetableindex = 1;
+	}
+	if (pv[0][1] == pv[2][1])
+	{
+		et = &fedgetables[edgetableindex ? 8 : 9];
+		goto have_table;
+	}
+	else if (pv[1][1] == pv[2][1])
+	{
+		et = &fedgetables[edgetableindex ? 10 : 11];
+		goto have_table;
+	}
+	if (pv[0][1] > pv[2][1])
+		edgetableindex += 2;
+	if (pv[1][1] > pv[2][1])
+		edgetableindex += 4;
+	et = &fedgetables[edgetableindex];
+have_table:
+
+// gradients (see D_PolysetCalcGradients)
+	g.skinwidth = r_affinetridesc.skinwidth;
+	g.pskin = (byte *)r_affinetridesc.pskin;
+
+	p00_minus_p20 = pv[0][0] - pv[2][0];
+	p01_minus_p21 = pv[0][1] - pv[2][1];
+	p10_minus_p20 = pv[1][0] - pv[2][0];
+	p11_minus_p21 = pv[1][1] - pv[2][1];
+
+	xstepdenominv = 1.0f / (float)xdenom;
+	ystepdenominv = -xstepdenominv;
+
+	t0 = pv[0][4] - pv[2][4];
+	t1 = pv[1][4] - pv[2][4];
+	g.lstepx = (int)
+			ceilf((t1 * p01_minus_p21 - t0 * p11_minus_p21) * xstepdenominv);
+	g.lstepy = (int)
+			ceilf((t1 * p00_minus_p20 - t0 * p10_minus_p20) * ystepdenominv);
+
+	t0 = sv[0] - sv[2];
+	t1 = sv[1] - sv[2];
+	g.sstepx = (int)((t1 * p01_minus_p21 - t0 * p11_minus_p21) * xstepdenominv);
+	g.sstepy = (int)((t1 * p00_minus_p20 - t0 * p10_minus_p20) * ystepdenominv);
+
+	t0 = pv[0][3] - pv[2][3];
+	t1 = pv[1][3] - pv[2][3];
+	g.tstepx = (int)((t1 * p01_minus_p21 - t0 * p11_minus_p21) * xstepdenominv);
+	g.tstepy = (int)((t1 * p00_minus_p20 - t0 * p10_minus_p20) * ystepdenominv);
+
+	t0 = pv[0][5] - pv[2][5];
+	t1 = pv[1][5] - pv[2][5];
+	g.zistepx = (int)((t1 * p01_minus_p21 - t0 * p11_minus_p21) * xstepdenominv);
+	g.zistepy = (int)((t1 * p00_minus_p20 - t0 * p10_minus_p20) * ystepdenominv);
+
+	_r_zistepx = g.zistepx;
+	_r_lstepx = g.lstepx;
+	_a_sstepxfrac = g.sstepx & 0xFFFF;
+	_a_tstepxfrac = g.tstepx & 0xFFFF;
+	_skinwidth = g.skinwidth;
+	_a_ststepxwhole = _skinwidth * (g.tstepx >> 16) + (g.sstepx >> 16);
+
+// left edge, top segment; the right edge starts at its own top vertex
+	ltop = pv[et->left[0]];
+	lbot = pv[et->left[1]];
+	rtop = pv[et->right[0]];
+	rbot = pv[et->right[1]];
+
+	lrem = lbot[1] - ltop[1];
+	rrem = rbot[1] - rtop[1];
+	lseg = rseg = 1;
+
+	D_FastLeftSegment (&l, &g, ltop, sv[et->left[0]], lbot, lrem, rtop[0], true);
+	D_FastRightSegment (&r, rtop, rbot, 0);
+
+	for (;;)
+	{
+		int		lcount;
+
+		lcount = r.aspancount - l.aspancount;
+
+		r.errorterm += r.erroradjustup;
+		if (r.errorterm >= 0)
+		{
+			r.aspancount += r.countextrastep;
+			r.errorterm -= r.erroradjustdown;
+		}
+		else
+		{
+			r.aspancount += r.ubasestep;
+		}
+
+		if (lcount)
+		{
+			byte	*lpdest = l.pdest;
+			byte	*lptex = l.ptex;
+			short	*lpz = l.pz;
+			int		lsfrac = l.sfrac;
+			int		ltfrac = l.tfrac;
+			int		llight = l.light;
+			int		lzi = l.zi;
+			int		cnt = lcount;
+
+#ifdef PD_PROFILE_FINE
+			npix += lcount;
+#endif
+
+		// pass 1: the pixels (interleaving stores to two buffers costs about twice as
+		// much on this memory as writing each buffer in its own run)
+			do
+			{
+				if ((lzi >> 16) >= *lpz)
+					*lpdest = cmap[*lptex + (llight & 0xFF00)];
+				lpdest++;
+				lzi += _r_zistepx;
+				lpz++;
+				llight += _r_lstepx;
+				lptex += _a_ststepxwhole;
+				lsfrac += _a_sstepxfrac;
+				lptex += lsfrac >> 16;
+				lsfrac &= 0xFFFF;
+				ltfrac += _a_tstepxfrac;
+				if (ltfrac & 0x10000)
+				{
+					lptex += _skinwidth;
+					ltfrac &= 0xFFFF;
+				}
+			} while (--cnt);
+
+		// pass 2: the z values of the pixels that passed (the z buffer is unchanged since pass 1)
+			lpz = l.pz;
+			lzi = l.zi;
+			cnt = lcount;
+			do
+			{
+				if ((lzi >> 16) >= *lpz)
+					*lpz = lzi >> 16;
+				lzi += _r_zistepx;
+				lpz++;
+			} while (--cnt);
+		}
+
+	// step the left edge to the next row
+		if (lrem > 1)
+		{
+			l.errorterm += l.erroradjustup;
+			if (l.errorterm >= 0)
+			{
+				l.pdest += l.pdestextrastep;
+				l.pz += l.pzextrastep;
+				l.aspancount += l.countextrastep;
+				l.ptex += l.ptexextrastep;
+				l.sfrac += l.sfracextrastep;
+				l.ptex += l.sfrac >> 16;
+				l.sfrac &= 0xFFFF;
+				l.tfrac += l.tfracextrastep;
+				if (l.tfrac & 0x10000)
+				{
+					l.ptex += _skinwidth;
+					l.tfrac &= 0xFFFF;
+				}
+				l.light += l.lightextrastep;
+				l.zi += l.ziextrastep;
+				l.errorterm -= l.erroradjustdown;
+			}
+			else
+			{
+				l.pdest += l.pdestbasestep;
+				l.pz += l.pzbasestep;
+				l.aspancount += l.ubasestep;
+				l.ptex += l.ptexbasestep;
+				l.sfrac += l.sfracbasestep;
+				l.ptex += l.sfrac >> 16;
+				l.sfrac &= 0xFFFF;
+				l.tfrac += l.tfracbasestep;
+				if (l.tfrac & 0x10000)
+				{
+					l.ptex += _skinwidth;
+					l.tfrac &= 0xFFFF;
+				}
+				l.light += l.lightbasestep;
+				l.zi += l.zibasestep;
+			}
+		}
+
+		lrem--;
+		rrem--;
+
+		if (rrem == 0)
+		{
+			if (rseg == et->numright)
+			{
+				if (lrem == 0 && lseg == et->numleft)
+					break;
+			}
+			else
+			{
+			// bottom segment of the right edge; its x is relative to the right top vertex
+				int		startcount = rbot[0] - rtop[0];
+
+				rseg = 2;
+				rtop = rbot;
+				rbot = pv[et->right[2]];
+				rrem = rbot[1] - rtop[1];
+				D_FastRightSegment (&r, rtop, rbot, startcount);
+			}
+		}
+
+		if (lrem == 0)
+		{
+			if (lseg == et->numleft)
+				break;
+
+			lseg = 2;
+			ltop = lbot;
+			lbot = pv[et->left[2]];
+			lrem = lbot[1] - ltop[1];
+			D_FastLeftSegment (&l, &g, ltop, sv[et->left[1]], lbot, lrem,
+					pv[et->right[0]][0], false);
+		}
+	}
+	PROF_CNTF(C_APIX, npix);
+}
+
+/*
+================
+D_DrawNonSubdiv
+================
+*/
+void D_DrawNonSubdiv (void)
+{
+	mtriangle_t		*ptri;
+	finalvert_t		*pfv, *index0, *index1, *index2;
+	int				i;
+	int				lnumtriangles;
+	int				*pv[3];
+	int				sv[3];
+	int				xdenom;
+
+	pfv = r_affinetridesc.pfinalverts;
+	ptri = r_affinetridesc.ptriangles;
+	lnumtriangles = r_affinetridesc.numtriangles;
+
+	for (i=0 ; i<lnumtriangles ; i++, ptri++)
+	{
+		index0 = pfv + ptri->vertindex[0];
+		index1 = pfv + ptri->vertindex[1];
+		index2 = pfv + ptri->vertindex[2];
+
+		xdenom = (index0->v[1]-index1->v[1]) *
+				(index0->v[0]-index2->v[0]) -
+				(index0->v[0]-index1->v[0])*(index0->v[1]-index2->v[1]);
+
+		if (xdenom >= 0)
+			continue;
+
+		pv[0] = index0->v;
+		pv[1] = index1->v;
+		pv[2] = index2->v;
+		sv[0] = index0->v[2];
+		sv[1] = index1->v[2];
+		sv[2] = index2->v[2];
+
+		if (!ptri->facesfront)
+		{
+			if (index0->flags & ALIAS_ONSEAM)
+				sv[0] += r_affinetridesc.seamfixupX16;
+			if (index1->flags & ALIAS_ONSEAM)
+				sv[1] += r_affinetridesc.seamfixupX16;
+			if (index2->flags & ALIAS_ONSEAM)
+				sv[2] += r_affinetridesc.seamfixupX16;
+		}
+
+		D_FastRasterizeTriangle (pv, sv, xdenom);
+	}
+}
+#endif	// PD_FAST_ALIAS
 
 /*
 ================

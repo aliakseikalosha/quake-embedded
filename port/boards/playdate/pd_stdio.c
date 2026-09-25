@@ -9,6 +9,7 @@
 #include <string.h>
 #include <ctype.h>
 #include "pd_port.h"
+#include "pdprof.h"
 
 typedef struct {
 	SDFile *f;
@@ -41,8 +42,10 @@ void pdq_log_line(const char *text)
 		out[n++] = ((unsigned char) *p >= 128) ? '?' : *p;
 	}
 	out[n] = '\0';
-	if (n)
+	if (n) {
 		qembd_pd->system->logToConsole("%s", out);
+		pdprof_note(out);
+	}
 }
 
 int pdq_printf(const char *fmt, ...)

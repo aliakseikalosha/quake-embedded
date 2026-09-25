@@ -24,6 +24,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "quakedef.h"
 #include "r_local.h"
 #include "d_local.h"
+#include "pdprof.h"
 
 unsigned char	*r_turb_pbase, *r_turb_pdest;
 fixed16_t		r_turb_s, r_turb_t, r_turb_sstep, r_turb_tstep;
@@ -96,35 +97,121 @@ void D_WarpScreen (void)
 int	qembd_lowres_rect[4];
 
 /*
+ * The 3D view is rendered at half resolution into r_warpbuffer. Expanding it
+ * into vid.buffer costs 96 KB of writes (and the display pass then reads them
+ * back), which on this device is dominated by cache misses. Instead each row
+ * pair of the view is marked pending, and the display layer dithers pending
+ * pairs straight from the half-resolution buffer. Only row pairs that
+ * something draws over (console, menu, HUD text; see DRAW_TOUCH in draw.h)
+ * are expanded into vid.buffer, so the overlay has its background.
+ */
+int			qembd_lowres_active;			// a low-res view is waiting for the display
+const byte	*qembd_lowres_src;				// half-resolution buffer (row 0)
+int			qembd_lowres_stride;
+byte		qembd_lowres_pending[PD_RENDER_HEIGHT / 2];	// per full-res row pair
+
+// Expand one half-resolution row into the two rows of its pair in vid.buffer
+static void D_UpscaleRow (int p)
+{
+	int		u;
+	int		w = qembd_lowres_rect[2] >> 1;
+	const byte	*src = qembd_lowres_src + p * qembd_lowres_stride + (qembd_lowres_rect[0] >> 1);
+	byte	*dest = vid.buffer + (p * 2) * vid.rowbytes + qembd_lowres_rect[0];
+	unsigned int	*d0 = (unsigned int *)dest;
+	unsigned int	*d1 = (unsigned int *)(dest + vid.rowbytes);
+
+	// four source pixels -> two words of doubled pixels, on both rows
+	for (u=0 ; u+4<=w ; u+=4)
+	{
+		unsigned int	s, lo, hi;
+
+		memcpy (&s, src + u, sizeof(s));
+		lo = s & 0xffff;
+		hi = s >> 16;
+		lo = ((lo | (lo << 8)) & 0x00ff00ff) * 0x101;	// p0 p0 p1 p1
+		hi = ((hi | (hi << 8)) & 0x00ff00ff) * 0x101;	// p2 p2 p3 p3
+		d0[0] = d1[0] = lo;
+		d0[1] = d1[1] = hi;
+		d0 += 2;
+		d1 += 2;
+	}
+
+	for ( ; u<w ; u++)
+	{
+		unsigned short	*e0 = (unsigned short *)d0;
+		unsigned short	*e1 = (unsigned short *)d1;
+
+		e0[0] = e1[0] = (unsigned short)(src[u] * 0x0101);
+		d0 = (unsigned int *)(e0 + 1);
+		d1 = (unsigned int *)(e1 + 1);
+	}
+}
+
+/*
+=============
+D_LowresTouch
+
+Called before anything draws into screen rows [y0, y1): expands the pending
+view row pairs among them, once.
+=============
+*/
+void D_LowresTouch (int y0, int y1)
+{
+	int		p, p0, p1;
+
+	if (y0 < qembd_lowres_rect[1])
+		y0 = qembd_lowres_rect[1];
+	if (y1 > qembd_lowres_rect[1] + qembd_lowres_rect[3])
+		y1 = qembd_lowres_rect[1] + qembd_lowres_rect[3];
+	if (y0 >= y1)
+		return;
+
+	p0 = y0 >> 1;
+	p1 = (y1 + 1) >> 1;
+	for (p=p0 ; p<p1 ; p++)
+	{
+		if (qembd_lowres_pending[p])
+		{
+			D_UpscaleRow (p);
+			qembd_lowres_pending[p] = 0;
+		}
+	}
+}
+
+/*
+=============
+D_LowresEndFrame
+
+The display has consumed the frame; nothing is pending any more.
+=============
+*/
+void D_LowresEndFrame (void)
+{
+	qembd_lowres_active = 0;
+}
+
+/*
 =============
 D_UpscaleScreen
 
-Pixel-doubles the half-resolution view from r_warpbuffer into vid.buffer, so
-the 2D overlays (console, menu, HUD) can still be drawn on top of it.
+Hands the half-resolution view in r_warpbuffer to the display layer (see above).
 =============
 */
 void D_UpscaleScreen (void)
 {
-	int		u, v;
-	int		w = r_refdef.vrect.width;
-	int		h = r_refdef.vrect.height;
-	unsigned int	rowbytes = vid.rowbytes;
-	byte	*dest = vid.buffer + (r_refdef.vrect.y * 2) * rowbytes + r_refdef.vrect.x * 2;
-	const byte	*src = d_viewbuffer + r_refdef.vrect.y * screenwidth + r_refdef.vrect.x;
-
-	for (v=0 ; v<h ; v++, src += screenwidth, dest += rowbytes * 2)
-	{
-		unsigned short	*d0 = (unsigned short *)dest;
-		unsigned short	*d1 = (unsigned short *)(dest + rowbytes);
-
-		for (u=0 ; u<w ; u++)
-			d0[u] = d1[u] = (unsigned short)(src[u] * 0x0101);
-	}
+	int		p;
 
 	qembd_lowres_rect[0] = r_refdef.vrect.x * 2;
 	qembd_lowres_rect[1] = r_refdef.vrect.y * 2;
-	qembd_lowres_rect[2] = w * 2;
-	qembd_lowres_rect[3] = h * 2;
+	qembd_lowres_rect[2] = r_refdef.vrect.width * 2;
+	qembd_lowres_rect[3] = r_refdef.vrect.height * 2;
+
+	qembd_lowres_src = d_viewbuffer;
+	qembd_lowres_stride = screenwidth;
+	memset (qembd_lowres_pending, 0, sizeof(qembd_lowres_pending));
+	for (p=r_refdef.vrect.y ; p<r_refdef.vrect.y + r_refdef.vrect.height ; p++)
+		qembd_lowres_pending[p] = 1;
+	qembd_lowres_active = 1;
 }
 #endif
 
@@ -302,9 +389,25 @@ D_DrawSpans8
 Note: This function is the top CPU consumer. Optimize it as far as possible!
 =============
 */
+#if defined(PD_FAST_SURFACES) && defined(__arm__)
+/*
+Span records are written by the edge scan (stores do not allocate cache lines) and read back
+here, so reading each one is a cache miss. The FP set-up of a span does no loads, and an early
+load overlaps with that (measured on the device: ~70% of a miss is hidden behind ALU work), so
+the next span's record is requested before this span's set-up and only used after its pixels.
+*/
+#define SPAN_TOUCH(next, sink)	do { if (next) __asm__ volatile("ldr %0, [%1]" : "=r"(sink) : "r"(next)); } while (0)
+#define SPAN_TOUCH_DONE(sink)	__asm__ volatile("" : : "r"(sink))
+#else
+#define SPAN_TOUCH(next, sink)	((void)0)
+#define SPAN_TOUCH_DONE(sink)	((void)0)
+#endif
+
 void D_DrawSpans8 (espan_t *pspan)
 {
 	int		count, spancount;
+	unsigned	touched = 0;
+	espan_t		*pnext;
 	unsigned char	*pbase, *pdest;
 	fixed16_t	s, t, snext, tnext, sstep = 0, tstep = 0;
 	float		sdivz, tdivz, zi, z, du, dv, spancountminus1;
@@ -334,6 +437,8 @@ void D_DrawSpans8 (espan_t *pspan)
 
 	do
 	{
+		pnext = pspan->pnext;
+		SPAN_TOUCH (pnext, touched);
 		pdest = (unsigned char *)&viewbuffer[(_screenwidth * pspan->v) + pspan->u];
 		count = pspan->count >> 4;
 		spancount = pspan->count % 16;
@@ -452,8 +557,9 @@ void D_DrawSpans8 (espan_t *pspan)
 				break;
 			}
 		}
+		SPAN_TOUCH_DONE (touched);
 	}
-	while ((pspan = pspan->pnext));
+	while ((pspan = pnext));
 }
 
 /*
@@ -470,6 +576,7 @@ void D_DrawZSpans (espan_t *pspan)
 	float			zi;
 	float			du, dv;
 
+	PROF_BEGINF(P_ZSPAN);
 // FIXME: check for clamping/range problems
 // we count on FP exceptions being turned off to avoid range problems
 	izistep = (int)(d_zistepu * 0x8000 * 0x10000);
@@ -518,4 +625,5 @@ void D_DrawZSpans (espan_t *pspan)
 			*pdest = (short)(izi >> 16);
 
 	} while ((pspan = pspan->pnext) != NULL);
+	PROF_ENDF(P_ZSPAN);
 }

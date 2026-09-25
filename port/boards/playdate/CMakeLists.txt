@@ -3,11 +3,18 @@ set(PLAYDATE_GAME_DEVICE quake_DEVICE)
 
 set(PD_SOURCES
 	main.c
+	keyqueue.c
+	autofire.c
+	weapons.c
 	display.c
 	fio.c
 	pd_stdio.c
 	snd.c
 )
+
+if(PD_PROFILE)
+	list(APPEND PD_SOURCES pdprof.c)
+endif()
 
 if(TOOLCHAIN STREQUAL "armgcc")
 	add_executable(${PLAYDATE_GAME_DEVICE} ${PD_SOURCES})

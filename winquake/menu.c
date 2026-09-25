@@ -1044,9 +1044,9 @@ again:
 /* OPTIONS MENU */
 
 #ifdef _WIN32
-#define	OPTIONS_ITEMS	15
+#define	OPTIONS_ITEMS	16
 #else
-#define	OPTIONS_ITEMS	14
+#define	OPTIONS_ITEMS	15
 #endif
 
 #define	SLIDER_RANGE	10
@@ -1060,7 +1060,7 @@ void M_Menu_Options_f (void)
 	m_entersound = true;
 
 #ifdef _WIN32
-	if ((options_cursor == 14) && (modestate != MS_WINDOWED))
+	if ((options_cursor == 15) && (modestate != MS_WINDOWED))
 	{
 		options_cursor = 0;
 	}
@@ -1068,9 +1068,12 @@ void M_Menu_Options_f (void)
 }
 
 
+extern cvar_t	d_mipcap;
+
 void M_AdjustSliders (int dir)
 {
 	S_LocalSound ("misc/menu3.wav");
+	host_options_dirty = true;
 
 	switch (options_cursor)
 	{
@@ -1148,8 +1151,12 @@ void M_AdjustSliders (int dir)
 		Cvar_SetValue ("cl_autofire", !cl_autofire.value);
 		break;
 
+	case 13:	// texture detail: low = d_mipcap 1, the sharpest mip level is never used
+		Cvar_SetValue ("d_mipcap", d_mipcap.value >= 1 ? 0 : 1);
+		break;
+
 #ifdef _WIN32
-	case 14:	// _windowed_mouse
+	case 15:	// _windowed_mouse
 		Cvar_SetValue ("_windowed_mouse", !_windowed_mouse.value);
 		break;
 #endif
@@ -1234,14 +1241,22 @@ void M_Options_Draw (void)
 	M_Print (16, 128, "              Autofire");
 	M_DrawCheckbox (220, 128, cl_autofire.value);
 
+	M_Print (16, 136, "        Texture detail");
+	if (d_mipcap.value >= 2)
+		M_Print (220, 136, "lowest");
+	else if (d_mipcap.value >= 1)
+		M_Print (220, 136, "low");
+	else
+		M_Print (220, 136, "high");
+
 	if (vid_menudrawfn)
-		M_Print (16, 136, "         Video Options");
+		M_Print (16, 144, "         Video Options");
 
 #ifdef _WIN32
 	if (modestate == MS_WINDOWED)
 	{
-		M_Print (16, 144, "             Use Mouse");
-		M_DrawCheckbox (220, 144, _windowed_mouse.value);
+		M_Print (16, 152, "             Use Mouse");
+		M_DrawCheckbox (220, 152, _windowed_mouse.value);
 	}
 #endif
 
@@ -1255,6 +1270,7 @@ void M_Options_Key (int k)
 	switch (k)
 	{
 	case K_ESCAPE:
+		Host_SaveOptions ();
 		M_Menu_Main_f ();
 		break;
 
@@ -1266,13 +1282,16 @@ void M_Options_Key (int k)
 			M_Menu_Keys_f ();
 			break;
 		case 1:
+			Host_SaveOptions ();
 			m_state = m_none;
 			Con_ToggleConsole_f ();
 			break;
 		case 2:
 			Cbuf_AddText ("exec default.cfg\n");
+			Cvar_SetValue ("d_mipcap", 0);	// port option that default.cfg does not know about
+			host_options_dirty = true;
 			break;
-		case 13:
+		case 14:
 			M_Menu_Video_f ();
 			break;
 		default:
@@ -1304,19 +1323,19 @@ void M_Options_Key (int k)
 		break;
 	}
 
-	if (options_cursor == 13 && vid_menudrawfn == NULL)
+	if (options_cursor == 14 && vid_menudrawfn == NULL)
 	{
 		if (k == K_UPARROW)
-			options_cursor = 12;
+			options_cursor = 13;
 		else
 			options_cursor = 0;
 	}
 
 #ifdef _WIN32
-	if ((options_cursor == 14) && (modestate != MS_WINDOWED))
+	if ((options_cursor == 15) && (modestate != MS_WINDOWED))
 	{
 		if (k == K_UPARROW)
-			options_cursor = 13;
+			options_cursor = 14;
 		else
 			options_cursor = 0;
 	}

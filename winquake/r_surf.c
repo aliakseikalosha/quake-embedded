@@ -21,6 +21,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "quakedef.h"
 #include "r_local.h"
+#include "pdprof.h"
 
 drawsurf_t	r_drawsurf;
 
@@ -139,6 +140,86 @@ void R_AddDynamicLights (void)
 	}
 }
 
+#ifdef PD_FAST_SURFACES
+/*
+===============
+R_DlightAffects
+
+R_MarkLights flags every surface on every BSP node that a dynamic light's radius reaches by plane
+distance alone, so many "dynamically lit" surfaces are nowhere near the light and R_AddDynamicLights
+changes none of their lightmap samples. This runs the same arithmetic without adding anything and
+says whether any sample could change. It is conservative: a sample counts if it would gain at least
+0.9. The light is added as float, and a lightmap sample can be as large as ~630000 (four styles at
+'z'), where floats are 1/16 apart, so a gain of up to 0.9 plus rounding still truncates to no
+change; below that the pass really changes nothing, above it we say "yes" whether or not it would.
+===============
+*/
+qboolean R_DlightAffects (msurface_t *surf)
+{
+	int			lnum;
+	int			sd, td;
+	float		dist, rad, minlight;
+	vec3_t		impact, local;
+	int			s, t;
+	int			i;
+	int			smax, tmax;
+	mtexinfo_t	*tex;
+
+	smax = (surf->extents[0]>>4)+1;
+	tmax = (surf->extents[1]>>4)+1;
+	tex = surf->texinfo;
+
+	for (lnum=0 ; lnum<MAX_DLIGHTS ; lnum++)
+	{
+		if ( !(surf->dlightbits & (1U<<lnum) ) )
+			continue;		// not lit by this light
+
+		rad = cl_dlights[lnum].radius;
+		dist = DotProduct (cl_dlights[lnum].origin, surf->plane->normal) -
+				surf->plane->dist;
+		rad -= fabsf(dist);
+		minlight = cl_dlights[lnum].minlight;
+		if (rad < minlight)
+			continue;
+		minlight = rad - minlight;
+
+		for (i=0 ; i<3 ; i++)
+		{
+			impact[i] = cl_dlights[lnum].origin[i] -
+					surf->plane->normal[i]*dist;
+		}
+
+		local[0] = DotProduct (impact, tex->vecs[0]) + tex->vecs[0][3];
+		local[1] = DotProduct (impact, tex->vecs[1]) + tex->vecs[1][3];
+
+		local[0] -= surf->texturemins[0];
+		local[1] -= surf->texturemins[1];
+
+		for (t = 0 ; t<tmax ; t++)
+		{
+			td = local[1] - t*16;
+			if (td < 0)
+				td = -td;
+			for (s=0 ; s<smax ; s++)
+			{
+				sd = local[0] - s*16;
+				if (sd < 0)
+					sd = -sd;
+				if (sd > td)
+					dist = sd + (td>>1);
+				else
+					dist = td + (sd>>1);
+				if (dist < minlight && (rad - dist)*256 >= 0.9f)
+					return true;
+			}
+		}
+	}
+
+	return false;
+}
+#endif
+
+
 /*
 ===============
 R_BuildLightMap
@@ -240,6 +321,106 @@ texture_t *R_TextureAnimation (texture_t *base)
 }
 
 
+#ifdef PD_FAST_SURFACES
+/*
+================
+R_DrawSurfaceRows
+
+Builds the 8-bit surface bitmap row by row instead of one 16-row block column at a time. The
+per-texel arithmetic is that of R_DrawSurfaceBlock8_mip*, but each row of the bitmap comes out
+as one contiguous run: every store to slow memory costs about the same per 32-byte line touched
+however few bytes it writes, so the 16-byte segments of the block order cost ~1.7x as much per
+byte as a full row.
+
+BUILDROWS is a macro so that each mip level gets its own fully unrolled texel loop.
+================
+*/
+#define MAXHBLOCKS	18
+
+#define BUILDROWS(SHIFT) \
+	for (v=0 ; v<nv ; v++) \
+	{ \
+		unsigned	*lnext = lptr + r_lightwidth; \
+\
+		for (u=0 ; u<nh ; u++) \
+		{ \
+			lleft[u] = lptr[u]; \
+			lright[u] = lptr[u + 1]; \
+			lleftstep[u] = (lnext[u] - lleft[u]) >> (SHIFT); \
+			lrightstep[u] = (lnext[u + 1] - lright[u]) >> (SHIFT); \
+		} \
+		lptr = lnext; \
+\
+		for (i=0 ; i<(1 << (SHIFT)) ; i++) \
+		{ \
+			unsigned char	*psrc = psrcband + i * tstep; \
+\
+			for (u=0 ; u<nh ; u++) \
+			{ \
+				int				lighttemp = lleft[u] - lright[u]; \
+				unsigned		lightstep = lighttemp >> (SHIFT); \
+				unsigned		light = lright[u]; \
+				unsigned char	*ps = psrc + soff[u]; \
+				unsigned char	*pd = prowdest + (u << (SHIFT)); \
+\
+				for (b=(1 << (SHIFT)) - 1 ; b>=0 ; b--) \
+				{ \
+					pd[b] = cmap[(light & 0xFF00) + ps[b]]; \
+					light += lightstep; \
+				} \
+\
+				lright[u] += lrightstep[u]; \
+				lleft[u] += lleftstep[u]; \
+			} \
+			prowdest += rowbytes; \
+		} \
+\
+		psrcband += (1 << (SHIFT)) * tstep; \
+		if (psrcband >= sourcemax) \
+			psrcband -= stepback; \
+	}
+
+static void R_DrawSurfaceRows (unsigned char *basetptr, int soffset, int smax)
+{
+	unsigned		lleft[MAXHBLOCKS], lright[MAXHBLOCKS], lleftstep[MAXHBLOCKS], lrightstep[MAXHBLOCKS];
+	int				soff[MAXHBLOCKS];
+	unsigned char	*cmap = (unsigned char *)vid.colormap;
+	unsigned char	*psrcband = basetptr;		// start of the row of texture that the current band of blocks reads
+	unsigned char	*prowdest = (unsigned char *)r_drawsurf.surfdat;
+	unsigned		*lptr = blocklights;
+	unsigned char	*sourcemax = r_sourcemax;
+	int				nh = r_numhblocks, nv = r_numvblocks;
+	int				tstep = sourcetstep, rowbytes = surfrowbytes, stepback = r_stepback;
+	int				u, v, i, b;
+
+// the texture column each block column starts at (wrapping, as in R_DrawSurface)
+	for (u=0 ; u<nh ; u++)
+	{
+		soff[u] = soffset;
+		soffset += blocksize;
+		if (soffset >= smax)
+			soffset = 0;
+	}
+
+	switch (r_drawsurf.surfmip)
+	{
+	case 0:
+		BUILDROWS (4)
+		break;
+	case 1:
+		BUILDROWS (3)
+		break;
+	case 2:
+		BUILDROWS (2)
+		break;
+	default:
+		BUILDROWS (1)
+		break;
+	}
+}
+#endif	// PD_FAST_SURFACES
+
+
 /*
 ===============
 R_DrawSurface
@@ -255,9 +436,12 @@ void R_DrawSurface (void)
 	unsigned char	*pcolumndest;
 	void			(*pblockdrawer)(void);
 	texture_t		*mt;
+	PROF_STK(K_RSURF);
 
 // calculate the lightings
+	PROF_BEGINF(P_LIGHT);
 	R_BuildLightMap ();
+	PROF_ENDF(P_LIGHT);
 	
 	surfrowbytes = r_drawsurf.rowbytes;
 
@@ -312,6 +496,15 @@ void R_DrawSurface (void)
 
 	pcolumndest = r_drawsurf.surfdat;
 
+	PROF_BEGINF(P_BLOCKS);
+#ifdef PD_FAST_SURFACES
+	if (r_pixbytes == 1 && r_numhblocks <= MAXHBLOCKS)
+	{
+		R_DrawSurfaceRows (basetptr, soffset, smax);
+		PROF_ENDF(P_BLOCKS);
+		return;
+	}
+#endif
 	for (u=0 ; u<r_numhblocks; u++)
 	{
 		r_lightptr = blocklights + u;
@@ -328,6 +521,7 @@ void R_DrawSurface (void)
 
 		pcolumndest += horzblockstep;
 	}
+	PROF_ENDF(P_BLOCKS);
 }
 
 //=============================================================================

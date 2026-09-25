@@ -17,6 +17,7 @@
 
 #include <quakedef.h>
 #include <quakembd.h>
+#include "pdprof.h"
 
 #ifndef DEFAULT_MEM_SIZE
 #define DEFAULT_MEM_SIZE (8 * 1024 * 1024)
@@ -190,7 +191,9 @@ void qembd_frame(void)
 	else
 		oldtime += time;
 
+	pdprof_frame_begin();
 	Host_Frame(time);
+	pdprof_frame_end();
 
 #if 0
 	// graphic debugging aids

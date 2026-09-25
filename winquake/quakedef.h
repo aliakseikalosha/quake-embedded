@@ -273,6 +273,9 @@ extern	cvar_t		sys_nostdout;
 extern	cvar_t		developer;
 
 extern	qboolean	host_initialized;		// true if into command execution
+extern	qboolean	host_options_dirty;		// an option changed in the menu; Host_SaveOptions writes config.cfg
+void Host_WriteConfiguration (void);
+void Host_SaveOptions (void);
 extern	float		host_frametime;
 extern	byte		*host_basepal;
 extern	byte		*host_colormap;

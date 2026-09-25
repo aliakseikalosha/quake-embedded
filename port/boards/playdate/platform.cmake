@@ -26,15 +26,56 @@ endif()
 set(PD_RENDER_WIDTH ${_pd_default_w} CACHE STRING "Quake render width (>= 320, multiple of 16 with PD_LOWRES_3D)")
 set(PD_RENDER_HEIGHT 240 CACHE STRING "Quake render height (>= 200, even)")
 
+# Update-callback rate the system aims for (frames per second, max 50; 0 = as
+# fast as the game can run). 30 is easy on the battery; try 50 or 0 to let
+# lighter scenes run faster than 30.
+set(PD_REFRESH_RATE 30 CACHE STRING "Playdate refresh rate (0-50, 0 = uncapped)")
+
 if(NOT CMAKE_BUILD_TYPE)
 	set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# Optimisation level of the engine on the device. The Cortex-M7 here has 4 KiB
+# instruction and data caches, so bigger code is not always faster: compare
+# -O3 (default), -O2 and -Os with "Show FPS" before settling.
+set(PD_OPT "-O3" CACHE STRING "Compiler optimisation flag for the device build")
+set(CMAKE_C_FLAGS_RELEASE "${PD_OPT} -DNDEBUG")
+
+# On-device profiler (see winquake/pdprof.h): per-frame section timings go to
+# prof.csv in the game's Data folder. PD_BENCH also plays the demos back with
+# timedemo so builds can be compared frame by frame.
+# Edge scan with the active edge table / surface stack on the stack instead of in
+# linked lists in the heap (identical output; see winquake/r_edge.c).
+option(PD_FAST_EDGES "Array-based edge scan" ON)
+# Alias model triangles rasterized with all per-triangle state in locals instead of ~50 globals plus a
+# span buffer, and world faces built with their per-edge scratch state on the stack (identical output;
+# see winquake/d_polyse.c and winquake/r_draw.c).
+option(PD_FAST_ALIAS "Register-based alias triangle rasterizer" ON)
+option(PD_FAST_FACES "Stack-based world face edge emission" ON)
+# Surface cache bitmaps built row by row (full-line stores), see winquake/r_surf.c
+option(PD_FAST_SURFACES "Row-order surface cache build" ON)
+
+option(PD_PROFILE "Build the on-device profiler" OFF)
+option(PD_PROFILE_FINE "With PD_PROFILE: also time world faces, edge scan parts, surface builds, server and QuakeC builtins (adds ~2 ms/frame of timer overhead)" OFF)
+option(PD_BENCH "With PD_PROFILE: run the demos as timedemos" OFF)
+set(PD_BENCH_CMDS "" CACHE STRING "With PD_BENCH: console commands run before the demo (separate with ;)")
+set(PD_BENCH_COUNT 3 CACHE STRING "With PD_BENCH: how many of demo1..demo3 to play (1-3)")
+
 add_compile_definitions(
 	QEMBD_PLAYDATE=1
+	$<$<BOOL:${PD_FAST_EDGES}>:PD_FAST_EDGES=1>
+	$<$<BOOL:${PD_FAST_ALIAS}>:PD_FAST_ALIAS=1>
+	$<$<BOOL:${PD_FAST_FACES}>:PD_FAST_FACES=1>
+	$<$<BOOL:${PD_FAST_SURFACES}>:PD_FAST_SURFACES=1>
+	$<$<BOOL:${PD_PROFILE}>:PD_PROFILE=1>
+	$<$<AND:$<BOOL:${PD_PROFILE}>,$<BOOL:${PD_PROFILE_FINE}>>:PD_PROFILE_FINE=1>
+	$<$<AND:$<BOOL:${PD_PROFILE}>,$<BOOL:${PD_BENCH}>>:PD_BENCH=1>
+	PD_BENCH_COUNT=${PD_BENCH_COUNT}
+	$<$<BOOL:${PD_BENCH_CMDS}>:PD_BENCH_CMDS=\"${PD_BENCH_CMDS}\">
 	TARGET_EXTENSION=1
 	PD_RENDER_WIDTH=${PD_RENDER_WIDTH}
 	PD_RENDER_HEIGHT=${PD_RENDER_HEIGHT}
+	PD_REFRESH_RATE=${PD_REFRESH_RATE}
 	$<$<BOOL:${PD_LOWRES_3D}>:PD_LOWRES_3D=1>
 	# Quake heap: try DEFAULT, back off in 512 KiB steps down to MIN.
 	DEFAULT_MEM_SIZE=\(7*1024*1024\)

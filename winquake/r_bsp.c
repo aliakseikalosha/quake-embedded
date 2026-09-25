@@ -21,6 +21,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "quakedef.h"
 #include "r_local.h"
+#include "pdprof.h"
 
 //
 // current entity info
@@ -441,6 +442,267 @@ void R_DrawSubmodelPolygons (model_t *pmodel, int clipflags)
 }
 
 
+#ifdef PD_FAST_FACES
+/*
+The original stamps msurface_t.visframe of every surface of every visible leaf and then reads it
+back for every surface of every node it crosses. That is a heap store (~100 ns) plus a cache line
+of the surface for each of them, most of which belong to faces that are then never drawn. One bit
+per world surface, in a buffer small enough to stay in the data cache, does the same job.
+*/
+static byte			r_surfvis[MAX_MAP_FACES / 8 + 1];
+static msurface_t	*r_worldsurfaces;
+
+#define SURF_MARK(surf)		(r_surfvis[((surf) - r_worldsurfaces) >> 3] |= 1 << (((surf) - r_worldsurfaces) & 7))
+#define SURF_MARKED(surf)	(r_surfvis[((surf) - r_worldsurfaces) >> 3] & (1 << (((surf) - r_worldsurfaces) & 7)))
+#else
+#define SURF_MARK(surf)		((surf)->visframe = r_framecount)
+#define SURF_MARKED(surf)	((surf)->visframe == r_framecount)
+#endif
+
+
+#ifdef PD_FAST_FACES
+/*
+================
+R_CullNode
+
+The frustum test, out of the recursive function so that its locals do not sit in every level of
+the recursion (the world traversal was the deepest use of the small game stack). Returns the
+clipflags left for the children, or -1 if the node is outside the view.
+================
+*/
+static __attribute__((noinline)) int R_CullNode (mnode_t *node, int clipflags)
+{
+	int			i, *pindex;
+	vec3_t		acceptpt, rejectpt;
+	float		d;
+
+	for (i=0 ; i<4 ; i++)
+	{
+		if (! (clipflags & (1<<i)) )
+			continue;	// don't need to clip against it
+
+	// generate accept and reject points
+	// FIXME: do with fast look-ups or integer tests based on the sign bit
+	// of the floating point values
+
+		pindex = pfrustum_indexes[i];
+
+		rejectpt[0] = (float)node->minmaxs[pindex[0]];
+		rejectpt[1] = (float)node->minmaxs[pindex[1]];
+		rejectpt[2] = (float)node->minmaxs[pindex[2]];
+
+		d = DotProduct (rejectpt, view_clipplanes[i].normal);
+		d -= view_clipplanes[i].dist;
+
+		if (d <= 0)
+			return -1;
+
+		acceptpt[0] = (float)node->minmaxs[pindex[3+0]];
+		acceptpt[1] = (float)node->minmaxs[pindex[3+1]];
+		acceptpt[2] = (float)node->minmaxs[pindex[3+2]];
+
+		d = DotProduct (acceptpt, view_clipplanes[i].normal);
+		d -= view_clipplanes[i].dist;
+
+		if (d >= 0)
+			clipflags &= ~(1<<i);	// node is entirely on screen
+	}
+
+	return clipflags;
+}
+
+
+/*
+================
+R_RecursiveWorldNode
+
+w carries edge_p, surface_p, r_currentkey and r_polycount (see rworld_t): the caller stores
+them back once the traversal is over
+================
+*/
+static void R_RecursiveWorldNode (rworld_t *w, mnode_t *node, int clipflags)
+{
+	int			i, c, side;
+	mplane_t	*plane;
+	msurface_t	*surf, **mark;
+	mleaf_t		*pleaf;
+	float		dot;
+
+	if (node->contents == CONTENTS_SOLID)
+		return;		// solid
+
+	if (node->visframe != r_visframecount)
+		return;
+
+	PROF_STK(K_WORLD);
+	PROF_CNTF(C_NODES, 1);
+
+// cull the clipping planes if not trivial accept
+	if (clipflags)
+	{
+		clipflags = R_CullNode (node, clipflags);
+		if (clipflags < 0)
+			return;
+	}
+
+// if a leaf node, draw stuff
+	if (node->contents < 0)
+	{
+		pleaf = (mleaf_t *)node;
+
+		mark = pleaf->firstmarksurface;
+		c = pleaf->nummarksurfaces;
+		PROF_CNTF(C_LEAVES, 1);
+		PROF_CNTF(C_MARKS, c);
+
+		PROF_BEGINF(P_WMARK);
+		if (c)
+		{
+			do
+			{
+				SURF_MARK (*mark);
+				mark++;
+			} while (--c);
+		}
+		PROF_ENDF(P_WMARK);
+
+	// deal with model fragments in this leaf
+		if (pleaf->efrags)
+		{
+			PROF_BEGINF(P_WEFRAG);
+			R_StoreEfrags (&pleaf->efrags);
+			PROF_ENDF(P_WEFRAG);
+		}
+
+		pleaf->key = w->currentkey;
+		w->currentkey++;		// all bmodels in a leaf share the same key
+	}
+	else
+	{
+	// node is just a decision point, so go down the apropriate sides
+
+	// find which side of the node we are on
+		plane = node->plane;
+
+		switch (plane->type)
+		{
+		case PLANE_X:
+			dot = modelorg[0] - plane->dist;
+			break;
+		case PLANE_Y:
+			dot = modelorg[1] - plane->dist;
+			break;
+		case PLANE_Z:
+			dot = modelorg[2] - plane->dist;
+			break;
+		default:
+			dot = DotProduct (modelorg, plane->normal) - plane->dist;
+			break;
+		}
+
+		if (dot >= 0)
+			side = 0;
+		else
+			side = 1;
+
+	// recurse down the children, front side first
+		R_RecursiveWorldNode (w, node->children[side], clipflags);
+
+	// draw stuff
+		c = node->numsurfaces;
+		PROF_CNTF(C_NSURFS, c);
+
+		if (c)
+		{
+			PROF_BEGINF(P_WSURFS);
+			surf = cl.worldmodel->surfaces + node->firstsurface;
+
+			if (dot < -BACKFACE_EPSILON)
+			{
+				do
+				{
+					if (SURF_MARKED (surf) &&
+						(surf->flags & SURF_PLANEBACK))
+					{
+						if (r_drawpolys)
+						{
+							if (r_worldpolysbacktofront)
+							{
+								if (numbtofpolys < MAX_BTOFPOLYS)
+								{
+									pbtofpolys[numbtofpolys].clipflags =
+											clipflags;
+									pbtofpolys[numbtofpolys].psurf = surf;
+									numbtofpolys++;
+								}
+							}
+							else
+							{
+								R_RenderPoly (surf, clipflags);
+							}
+						}
+						else
+						{
+							PROF_BEGINF(P_FACE);
+							R_RenderFaceW (w, surf, clipflags);
+							PROF_ENDF(P_FACE);
+							PROF_CNTF(C_FACES, 1);
+						}
+					}
+
+					surf++;
+				} while (--c);
+			}
+			else if (dot > BACKFACE_EPSILON)
+			{
+				do
+				{
+					if (SURF_MARKED (surf) &&
+						!(surf->flags & SURF_PLANEBACK))
+					{
+						if (r_drawpolys)
+						{
+							if (r_worldpolysbacktofront)
+							{
+								if (numbtofpolys < MAX_BTOFPOLYS)
+								{
+									pbtofpolys[numbtofpolys].clipflags =
+											clipflags;
+									pbtofpolys[numbtofpolys].psurf = surf;
+									numbtofpolys++;
+								}
+							}
+							else
+							{
+								R_RenderPoly (surf, clipflags);
+							}
+						}
+						else
+						{
+							PROF_BEGINF(P_FACE);
+							R_RenderFaceW (w, surf, clipflags);
+							PROF_ENDF(P_FACE);
+							PROF_CNTF(C_FACES, 1);
+						}
+					}
+
+					surf++;
+				} while (--c);
+			}
+
+			PROF_ENDF(P_WSURFS);
+
+		// all surfaces on the same node share the same sequence number
+			w->currentkey++;
+		}
+
+	// recurse down the back side
+		R_RecursiveWorldNode (w, node->children[!side], clipflags);
+	}
+}
+
+#else	// !PD_FAST_FACES
+
 /*
 ================
 R_RecursiveWorldNode
@@ -460,6 +722,9 @@ void R_RecursiveWorldNode (mnode_t *node, int clipflags)
 
 	if (node->visframe != r_visframecount)
 		return;
+
+	PROF_STK(K_WORLD);
+	PROF_CNTF(C_NODES, 1);
 
 // cull the clipping planes if not trivial accept
 // FIXME: the compiler is doing a lousy job of optimizing here; it could be
@@ -506,20 +771,26 @@ void R_RecursiveWorldNode (mnode_t *node, int clipflags)
 
 		mark = pleaf->firstmarksurface;
 		c = pleaf->nummarksurfaces;
+		PROF_CNTF(C_LEAVES, 1);
+		PROF_CNTF(C_MARKS, c);
 
+		PROF_BEGINF(P_WMARK);
 		if (c)
 		{
 			do
 			{
-				(*mark)->visframe = r_framecount;
+				SURF_MARK (*mark);
 				mark++;
 			} while (--c);
 		}
+		PROF_ENDF(P_WMARK);
 
 	// deal with model fragments in this leaf
 		if (pleaf->efrags)
 		{
+			PROF_BEGINF(P_WEFRAG);
 			R_StoreEfrags (&pleaf->efrags);
+			PROF_ENDF(P_WEFRAG);
 		}
 
 		pleaf->key = r_currentkey;
@@ -558,17 +829,19 @@ void R_RecursiveWorldNode (mnode_t *node, int clipflags)
 
 	// draw stuff
 		c = node->numsurfaces;
+		PROF_CNTF(C_NSURFS, c);
 
 		if (c)
 		{
+			PROF_BEGINF(P_WSURFS);
 			surf = cl.worldmodel->surfaces + node->firstsurface;
 
 			if (dot < -BACKFACE_EPSILON)
 			{
 				do
 				{
-					if ((surf->flags & SURF_PLANEBACK) &&
-						(surf->visframe == r_framecount))
+					if (SURF_MARKED (surf) &&
+						(surf->flags & SURF_PLANEBACK))
 					{
 						if (r_drawpolys)
 						{
@@ -589,7 +862,10 @@ void R_RecursiveWorldNode (mnode_t *node, int clipflags)
 						}
 						else
 						{
+							PROF_BEGINF(P_FACE);
 							R_RenderFace (surf, clipflags);
+							PROF_ENDF(P_FACE);
+							PROF_CNTF(C_FACES, 1);
 						}
 					}
 
@@ -600,8 +876,8 @@ void R_RecursiveWorldNode (mnode_t *node, int clipflags)
 			{
 				do
 				{
-					if (!(surf->flags & SURF_PLANEBACK) &&
-						(surf->visframe == r_framecount))
+					if (SURF_MARKED (surf) &&
+						!(surf->flags & SURF_PLANEBACK))
 					{
 						if (r_drawpolys)
 						{
@@ -622,13 +898,18 @@ void R_RecursiveWorldNode (mnode_t *node, int clipflags)
 						}
 						else
 						{
+							PROF_BEGINF(P_FACE);
 							R_RenderFace (surf, clipflags);
+							PROF_ENDF(P_FACE);
+							PROF_CNTF(C_FACES, 1);
 						}
 					}
 
 					surf++;
 				} while (--c);
 			}
+
+			PROF_ENDF(P_WSURFS);
 
 		// all surfaces on the same node share the same sequence number
 			r_currentkey++;
@@ -639,6 +920,7 @@ void R_RecursiveWorldNode (mnode_t *node, int clipflags)
 	}
 }
 
+#endif	// PD_FAST_FACES
 
 
 /*
@@ -659,7 +941,28 @@ void R_RenderWorld (void)
 	clmodel = currententity->model;
 	r_pcurrentvertbase = clmodel->vertexes;
 
+#ifdef PD_FAST_FACES
+	r_worldsurfaces = cl.worldmodel->surfaces;
+	memset (r_surfvis, 0, (cl.worldmodel->numsurfaces + 7) >> 3);
+#endif
+
+#ifdef PD_FAST_FACES
+	{
+		rworld_t	w;
+
+		w.edge_p = edge_p;
+		w.surface_p = surface_p;
+		w.currentkey = r_currentkey;
+		w.polycount = r_polycount;
+		R_RecursiveWorldNode (&w, clmodel->nodes, 15);
+		edge_p = w.edge_p;
+		surface_p = w.surface_p;
+		r_currentkey = w.currentkey;
+		r_polycount = w.polycount;
+	}
+#else
 	R_RecursiveWorldNode (clmodel->nodes, 15);
+#endif
 
 // if the driver wants the polygons back to front, play the visible ones back
 // in that order

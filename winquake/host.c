@@ -20,6 +20,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 // host.c -- coordinates spawning and killing of local servers
 
 #include "quakedef.h"
+#include "pdprof.h"
 #include "r_local.h"
 
 /*
@@ -234,11 +235,36 @@ void Host_WriteConfiguration (void)
 			return;
 		}
 		
+#ifndef QEMBD_PLAYDATE
+		// on the Playdate the bindings come from default.cfg and the port itself (buttons, the
+		// weapon menu); writing them here would freeze them into a file that overrides future defaults
 		Key_WriteBindings (f);
+#endif
 		Cvar_WriteVariables (f);
 
 		fclose (f);
 	}
+}
+
+
+/*
+===============
+Host_SaveOptions
+
+Writes config.cfg if an option was changed in the menu since it was last written. The
+Playdate never runs Host_Shutdown (the game is stopped from the system menu), so without this
+the options would be forgotten every launch.
+===============
+*/
+qboolean	host_options_dirty;
+
+void Host_SaveOptions (void)
+{
+	if (!host_options_dirty)
+		return;
+
+	host_options_dirty = false;
+	Host_WriteConfiguration ();
 }
 
 
@@ -537,15 +563,23 @@ void Host_ServerFrame (void)
 	SV_CheckForNewClients ();
 
 // read client messages
+	PROF_BEGINF(P_SVRUN);
 	SV_RunClients ();
+	PROF_ENDF(P_SVRUN);
 	
 // move things around and think
 // always pause in single player if in console or menus
 	if (!sv.paused && (svs.maxclients > 1 || key_dest == key_game) )
+	{
+		PROF_BEGINF(P_SVPHYS);
 		SV_Physics ();
+		PROF_ENDF(P_SVPHYS);
+	}
 
 // send all messages to the clients
+	PROF_BEGINF(P_SVSEND);
 	SV_SendClientMessages ();
+	PROF_ENDF(P_SVSEND);
 }
 
 /*
@@ -576,6 +610,7 @@ void _Host_Frame (float time)
 
 		
 // get new key events
+	PROF_BEGIN(P_INPUT);
 	Sys_SendKeyEvents ();
 
 
@@ -588,6 +623,7 @@ void _Host_Frame (float time)
 
 
 	NET_Poll();
+	PROF_END(P_INPUT);
 
 
 
@@ -607,8 +643,10 @@ void _Host_Frame (float time)
 
 
 	
+	PROF_BEGIN(P_SERVER);
 	if (sv.active)
 		Host_ServerFrame ();
+	PROF_END(P_SERVER);
 
 
 //-------------------
@@ -627,22 +665,27 @@ void _Host_Frame (float time)
 	host_time += (double) host_frametime;
 
 // fetch results from server
+	PROF_BEGIN(P_CLIENT);
 	if (cls.state == ca_connected)
 	{
 		CL_ReadFromServer ();
 	}
+	PROF_END(P_CLIENT);
 // update video
 	if (host_speeds.value)
 		time1 = Sys_FloatTime ();
 
 		
+	PROF_BEGIN(P_SCR);
 	SCR_UpdateScreen ();
+	PROF_END(P_SCR);
 
 
 	if (host_speeds.value)
 		time2 = Sys_FloatTime ();
 		
 // update audio
+	PROF_BEGIN(P_SND);
 	if (cls.signon == SIGNONS)
 	{
 		S_Update (r_origin, vpn, vright, vup);
@@ -653,6 +696,7 @@ void _Host_Frame (float time)
 
 	
 	CDAudio_Update();
+	PROF_END(P_SND);
 
 
 	if (host_speeds.value)

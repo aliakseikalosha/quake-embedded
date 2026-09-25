@@ -24,6 +24,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #endif
 #include <fcntl.h>
 #include "quakedef.h"
+#include "pdprof.h"
 
 int 		con_linewidth;
 
@@ -394,6 +395,7 @@ void Con_Printf (char *fmt, ...)
 	
 // also echo to debugging console
 	Sys_Printf ("%s", msg);	// also echo to debugging console
+	PROF_STK(K_CON);
 
 // log all messages to file
 	if (con_debuglog)

@@ -87,6 +87,9 @@ void VID_Update(vrect_t *rects)
 		rects = rects->pnext;
 	}
 	qembd_refresh();
+#ifdef PD_LOWRES_3D
+	D_LowresEndFrame();
+#endif
 }
 
 void D_BeginDirectRect(int x, int y, byte *pbitmap, int width, int height)
