@@ -243,6 +243,7 @@ extern	cvar_t	cl_name;
 extern	cvar_t	cl_color;
 
 extern	cvar_t	cl_upspeed;
+extern	cvar_t	cl_autofire;
 extern	cvar_t	cl_forwardspeed;
 extern	cvar_t	cl_backspeed;
 extern	cvar_t	cl_sidespeed;

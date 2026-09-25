@@ -5,11 +5,12 @@
  *   D-pad up/down   walk forward / back      (menus: move)
  *   D-pad left/right turn                    (menus: change value)
  *   A               fire                     (menus: select)
- *   B               jump (on release)        (menus: back)
- *   B + left/right  previous / next weapon
+ *   B               jump                     (menus: back)
  *   Crank           turn left / right
- *   System menu     "Quake Menu" opens Quake's own menu; "Always Run" toggles
- *                   running; "Show FPS" draws the frame rate.
+ *                   (crank out: D-pad left/right strafe instead of turning)
+ *   Crank out       autofire while an enemy is under the crosshair
+ *   System menu     "Quake Menu" opens Quake's own menu (autofire is toggled in
+ *                   its Options); "Weapon" lists the weapons you can use now.
  * While a demo is playing (title screen) A and B open Quake's menu.
  */
 
@@ -25,16 +26,15 @@ enum { ST_SPLASH, ST_INIT, ST_RUN, ST_STOPPED };
 
 #define CRANK_TURN 1.0f		/* degrees of view turn per degree of crank */
 #define RUN_SPEED 400
-#define WALK_SPEED 200
+#define AUTOFIRE_RANGE 2048.0f
+#define AUTOFIRE_AXE_RANGE 64.0f
 
 static int state = ST_SPLASH;
 static jmp_buf frame_jmp;
 static int in_frame;
 
 static int menu_requested;
-static int always_run = 1;
-static int show_fps;
-static PDMenuItem *run_item, *fps_item;
+static PDMenuItem *weapon_item;
 
 /* ---------------------------------------------------------------- time */
 
@@ -174,11 +174,71 @@ static const struct {
 };
 #define NUM_BUTTONS (int) (sizeof(buttons) / sizeof(buttons[0]))
 
+extern cvar_t sv_aim;
+
+static int is_live_monster(edict_t *e)
+{
+	return ((int) e->v.flags & FL_MONSTER) && e->v.takedamage && e->v.health > 0;
+}
+
+/*
+ * Would firing right now hit a live monster? Mirrors PF_aim (Quake's
+ * vertical auto-aim): a monster counts if it is on the crosshair, or inside
+ * the sv_aim cone and visible, so height differences don't matter. The axe
+ * doesn't auto-aim, so it only counts what is directly in front within reach.
+ * (The single-player server is local, so its edicts can be read directly.)
+ */
+static int enemy_in_sight(void)
+{
+	vec3_t fwd, right, up, start, end, dir;
+	trace_t tr;
+	edict_t *check;
+	int i, j;
+
+	if (!sv.active || !sv_player)
+		return 0;
+
+	AngleVectors(cl.viewangles, fwd, right, up);
+
+	if ((int) sv_player->v.weapon == IT_AXE) {
+		VectorAdd(sv_player->v.origin, sv_player->v.view_ofs, start);
+		VectorMA(start, AUTOFIRE_AXE_RANGE, fwd, end);
+		tr = SV_Move(start, vec3_origin, vec3_origin, end, MOVE_NORMAL, sv_player);
+		return tr.ent && is_live_monster(tr.ent);
+	}
+
+	VectorCopy(sv_player->v.origin, start);
+	start[2] += 20;
+
+	/* Straight shot */
+	VectorMA(start, AUTOFIRE_RANGE, fwd, end);
+	tr = SV_Move(start, vec3_origin, vec3_origin, end, MOVE_NORMAL, sv_player);
+	if (tr.ent && is_live_monster(tr.ent))
+		return 1;
+
+	/* Anything auto-aim could turn toward */
+	check = NEXT_EDICT(sv.edicts);
+	for (i = 1; i < sv.num_edicts; i++, check = NEXT_EDICT(check)) {
+		if (check == sv_player || !is_live_monster(check))
+			continue;
+		for (j = 0; j < 3; j++)
+			end[j] = check->v.origin[j] + 0.5f * (check->v.mins[j] + check->v.maxs[j]);
+		VectorSubtract(end, start, dir);
+		VectorNormalize(dir);
+		if (DotProduct(dir, fwd) < sv_aim.value)
+			continue;	/* too far to turn */
+		tr = SV_Move(start, vec3_origin, vec3_origin, end, MOVE_NORMAL, sv_player);
+		if (tr.ent == check)
+			return 1;
+	}
+	return 0;
+}
+
 static void poll_input(void)
 {
 	static PDButtons prev;
 	static int sent[NUM_BUTTONS];	/* key sent on press, released with the same */
-	static int b_combo;		/* B was used as a weapon-switch modifier */
+	static int auto_down;		/* autofire is holding +attack */
 	PDButtons cur;
 	int ui = key_dest != key_game;
 	int playing = !ui && !cls.demoplayback;
@@ -192,20 +252,12 @@ static void poll_input(void)
 		if (down && !was) {
 			int key = ui ? buttons[i].ui_key : buttons[i].game_key;
 
-			/* B + left/right: switch weapon instead of turning */
-			if (playing && (cur & kButtonB) &&
-			    (buttons[i].mask == kButtonLeft || buttons[i].mask == kButtonRight)) {
-				Cbuf_AddText(buttons[i].mask == kButtonRight ?
-				             "impulse 10\n" : "impulse 12\n");
-				b_combo = 1;
-				sent[i] = 0;
-				continue;
-			}
-			/* In game B jumps on release, so it can act as a modifier */
-			if (playing && buttons[i].mask == kButtonB) {
-				b_combo = 0;
-				sent[i] = 0;
-				continue;
+			/* With the crank out the crank turns, so left/right strafe */
+			if (playing && !qembd_pd->system->isCrankDocked()) {
+				if (buttons[i].mask == kButtonLeft)
+					key = ',';
+				else if (buttons[i].mask == kButtonRight)
+					key = '.';
 			}
 
 			/* Title-screen demo: any button opens the menu */
@@ -214,15 +266,23 @@ static void poll_input(void)
 			sent[i] = key;
 			push_key(key, 1);
 		} else if (!down && was) {
-			if (sent[i]) {
-				push_key(sent[i], 0);
-			} else if (buttons[i].mask == kButtonB && playing && !b_combo) {
-				push_key(buttons[i].game_key, 1);
-				push_key(buttons[i].game_key, 0);
-			}
+			push_key(sent[i], 0);
 		}
 	}
 	prev = cur;
+
+	/* Crank out: hold fire while an enemy is under the crosshair */
+	if (cur & kButtonA) {
+		auto_down = 0;	/* A owns the fire key; its release will let go */
+	} else {
+		int want = cl_autofire.value && playing && !qembd_pd->system->isCrankDocked() &&
+		           enemy_in_sight();
+
+		if (want != auto_down) {
+			push_key(K_CTRL, want);
+			auto_down = want;
+		}
+	}
 
 	if (menu_requested) {
 		menu_requested = 0;
@@ -237,8 +297,8 @@ static void poll_input(void)
 
 static void apply_run(void)
 {
-	Cvar_SetValue("cl_forwardspeed", always_run ? RUN_SPEED : WALK_SPEED);
-	Cvar_SetValue("cl_backspeed", always_run ? RUN_SPEED : WALK_SPEED);
+	Cvar_SetValue("cl_forwardspeed", RUN_SPEED);
+	Cvar_SetValue("cl_backspeed", RUN_SPEED);
 }
 
 static void menu_quake(void *ud)
@@ -246,16 +306,70 @@ static void menu_quake(void *ud)
 	menu_requested = 1;
 }
 
-static void menu_run(void *ud)
+/* Weapons in impulse order (impulse 1 = axe ... 8 = thunderbolt) */
+static const struct {
+	const char *name;
+	int item;	/* IT_* bit that says the weapon is owned */
+	int ammo_stat;	/* STAT_* holding its ammo, or -1 */
+	int ammo_min;	/* ammo needed to select it (Quake refuses otherwise) */
+} weapons[] = {
+	{"Axe",           IT_AXE,              -1,            0},
+	{"Shotgun",       IT_SHOTGUN,          STAT_SHELLS,   1},
+	{"Dbl Shotgun",   IT_SUPER_SHOTGUN,    STAT_SHELLS,   2},
+	{"Nailgun",       IT_NAILGUN,          STAT_NAILS,    1},
+	{"Super Nailgun", IT_SUPER_NAILGUN,    STAT_NAILS,    2},
+	{"Grenade",       IT_GRENADE_LAUNCHER, STAT_ROCKETS,  1},
+	{"Rocket",        IT_ROCKET_LAUNCHER,  STAT_ROCKETS,  1},
+	{"Lightning",     IT_LIGHTNING,        STAT_CELLS,    1},
+};
+#define NUM_WEAPONS (int) (sizeof(weapons) / sizeof(weapons[0]))
+
+/* The menu only lists usable weapons: avail_impulse[menu value] = impulse */
+static const char *avail_names[NUM_WEAPONS];
+static int avail_impulse[NUM_WEAPONS];
+static int num_avail;
+
+static void menu_weapon(void *ud)
 {
-	always_run = qembd_pd->system->getMenuItemValue(run_item);
-	if (state == ST_RUN)
-		apply_run();
+	int v = qembd_pd->system->getMenuItemValue(weapon_item);
+
+	if (state == ST_RUN && v >= 0 && v < num_avail)
+		Cbuf_AddText(va("impulse %d\n", avail_impulse[v]));
 }
 
-static void menu_fps(void *ud)
+/*
+ * Options can't change once a menu item exists, so rebuild it each time the
+ * system menu opens, listing only the weapons that can be selected right now.
+ */
+static void rebuild_weapon_item(void)
 {
-	show_fps = qembd_pd->system->getMenuItemValue(fps_item);
+	int current = 0;
+
+	if (weapon_item) {
+		qembd_pd->system->removeMenuItem(weapon_item);
+		weapon_item = NULL;
+	}
+	if (state != ST_RUN || cls.state != ca_connected || cls.demoplayback)
+		return;
+
+	num_avail = 0;
+	for (int i = 0; i < NUM_WEAPONS; i++) {
+		if (!(cl.items & weapons[i].item))
+			continue;
+		if (weapons[i].ammo_stat >= 0 && cl.stats[weapons[i].ammo_stat] < weapons[i].ammo_min)
+			continue;
+		if (cl.stats[STAT_ACTIVEWEAPON] == weapons[i].item)
+			current = num_avail;
+		avail_names[num_avail] = weapons[i].name;
+		avail_impulse[num_avail] = i + 1;
+		num_avail++;
+	}
+	if (num_avail < 2)
+		return;		/* nothing to choose between */
+
+	weapon_item = qembd_pd->system->addOptionsMenuItem("Weapon", avail_names, num_avail,
+	                                                   menu_weapon, NULL);
+	qembd_pd->system->setMenuItemValue(weapon_item, current);
 }
 
 /* --------------------------------------------------------------- update */
@@ -283,6 +397,8 @@ static int update(void *ud)
 			return 1;
 		}
 		apply_run();
+		Key_SetBinding(',', "+moveleft");
+		Key_SetBinding('.', "+moveright");
 		in_frame = 0;
 		state = ST_RUN;
 		return 1;
@@ -295,8 +411,6 @@ static int update(void *ud)
 		poll_input();
 		qembd_frame();
 		in_frame = 0;
-		if (show_fps)
-			qembd_pd->system->drawFPS(0, 0);
 		return 1;
 
 	default:
@@ -311,13 +425,13 @@ int eventHandler(PlaydateAPI *playdate, PDSystemEvent event, uint32_t arg)
 {
 	(void) arg;
 
+	if (event == kEventPause)
+		rebuild_weapon_item();
+
 	if (event == kEventInit) {
 		qembd_pd = playdate;
 		playdate->display->setRefreshRate(30);
 		playdate->system->addMenuItem("Quake Menu", menu_quake, NULL);
-		run_item = playdate->system->addCheckmarkMenuItem("Always Run", always_run,
-		                                                  menu_run, NULL);
-		fps_item = playdate->system->addCheckmarkMenuItem("Show FPS", show_fps, menu_fps, NULL);
 		/* Setting an update callback tells the system this is a pure C game */
 		playdate->system->setUpdateCallback(update, NULL);
 	}
