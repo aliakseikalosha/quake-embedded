@@ -290,6 +290,7 @@ static int update(void *ud)
 		}
 		pdprof_stage("qembd_init done");
 		apply_run();
+		Cvar_SetValue("scr_showfps", 1); /* matches the checked "Show FPS" system menu item */
 		pdprof_init();
 		Key_SetBinding(',', "+moveleft");
 		Key_SetBinding('.', "+moveright");

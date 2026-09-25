@@ -1,25 +1,35 @@
-# Quake for embedded devices
+# Quake for Playdate
 
-This project is yet another WinQuake port for embedded devices, primarily for RISC-V devices.
+A WinQuake port for the [Playdate](https://play.date/), running on the device and in the Playdate Simulator.
 
-![QuakEMBD on Action](https://i.imgur.com/wctRYIJ.gif)
+Based on the original [Quake GPL source](https://github.com/id-Software/Quake), through [sysprog21/quake-embedded](https://github.com/sysprog21/quake-embedded).
 
-Based on original [Quake GPL source](https://github.com/id-Software/Quake).
+## Controls
 
-## How to build
+| Input | In the game | In Quake's menus |
+| --- | --- | --- |
+| D-pad up / down | Walk forward / back | Move the cursor |
+| D-pad left / right | Turn left / right (crank out: strafe) | Change the highlighted value |
+| A | Fire | Select |
+| B | Jump | Back |
+| Crank | Turn left / right (clockwise = right) | - |
 
-Use CMake with [GNU toolchain for RISC-V](https://github.com/riscv-collab/riscv-gnu-toolchain) installed.
+You run by default; the Options menu's "Always Run" turns that off. While the title-screen demo plays, A or B opens Quake's menu.
 
-Build Instruction:
-```shell
-git clone https://github.com/sysprog21/quake-embedded && cd quake-embedded
-mkdir build && cd build
-cmake -DCMAKE_TOOLCHAIN_FILE=../port/boards/rv32emu/toolchain.cmake \
-      -DCMAKE_BUILD_TYPE=RELEASE -DBOARD_NAME=rv32emu ..
-make
-```
+**Crank out.** Pulling the crank out of the body changes two things:
 
-## Playdate
+- The crank turns the view, so D-pad left / right strafe instead of turning.
+- Autofire is active (below).
+
+**Autofire.** With the crank out and "Autofire" on in the Options menu (it is on by default), the game holds fire for you while a live monster is in your line of fire: on the crosshair, or inside the range Quake's own auto-aim would turn toward. The axe only swings at what is within reach, and grenade and rocket launchers fire once every 2 seconds instead of being held. Hold A to fire yourself at any time.
+
+**System menu** (the Playdate's menu button):
+
+- **Game Menu** opens Quake's own menu (new game, save and load, Options).
+- **Weapon** picks a weapon you own and have ammo for. It appears during play once you can choose between two or more. There is no weapon-cycling button, so this is how you switch.
+- **Show FPS** toggles the frame-rate counter (on at launch).
+
+## Building
 
 Requires the [Playdate SDK](https://play.date/dev/) (`PLAYDATE_SDK_PATH` set) and, for the device, the Arm toolchain the SDK installs.
 
@@ -27,9 +37,12 @@ Game data is not included. Copy your `pak0.pak` (the freely distributable sharew
 `port/boards/playdate/Source/id1/pak0.pak` before building, or into the game's Data folder at `id1/`.
 
 ```shell
+git clone https://github.com/aliakseikalosha/quake-embedded && cd quake-embedded
+
 # Simulator
 mkdir build-sim && cd build-sim
 cmake -DBOARD_NAME=playdate .. && make          # -> quake.pdx
+cd ..
 
 # Device
 mkdir build-dev && cd build-dev
@@ -48,13 +61,13 @@ Performance knobs (device build, pass to `cmake`):
 - `-DPD_FAST_SURFACES=ON` (default) surface cache bitmaps are built row by row (each row is one run of stores instead of sixteen 16-byte segments), and a surface that R_MarkLights flagged as dynamically lit but whose lightmap no light would actually change keeps its cache instead of being rebuilt (48% of the dynamic-light rebuilds in the demos; a rebuild would give the same texels). Identical output; `OFF` uses the original code.
 - `-DPD_LOWRES_3D=ON` (default) renders the 3D view at half resolution; the display layer dithers it straight from the half-resolution buffer and only expands the rows that the console, menu or HUD text draw over.
 
-### Settings
+## Settings
 
 The Options menu keeps its settings (view size, brightness, volume, always run, autofire, **texture detail** ...) in `config.cfg` in the game's Data folder. It is written when you leave the Options menu and when the system pauses, locks or terminates the game, and read at the next launch. Key bindings are not saved (they come from `default.cfg` and the port's own button mapping).
 
 Texture detail: `high` (default, `d_mipcap 0`) or `low` (`d_mipcap 1`, the sharpest mip level is never used; about 1.6 ms per frame faster in the demos, about 3%, with visibly softer textures).
 
-### Profiling on the device
+## Profiling on the device
 
 `-DPD_PROFILE=ON` builds an on-device profiler (nothing is compiled in otherwise): per-frame section timings and counters go to `prof.csv` in the game's Data folder. Add `-DPD_BENCH=ON` to play the demos back with `timedemo` (every demo frame is rendered, so builds can be compared frame for frame; `-DPD_BENCH_COUNT=1` plays only demo1, `-DPD_BENCH_CMDS="d_mipcap 1"` runs console commands first) and `-DPD_PROFILE_FINE=ON` for more detailed sections (adds about 2 ms per frame of timer overhead).
 
@@ -80,8 +93,6 @@ What the measurements showed about this hardware (useful when optimising):
 - Surface cache: 73% of the builds in demo1 were dynamic-light rebuilds (muzzle flashes, projectiles), the rest first-time builds of newly visible surfaces; light styles and animated textures are negligible. The cache never thrashes (693 KB, ~4 MB of hunk is free). `d_mipcap 1` (coarser textures, changes the picture) is worth ~1.6 ms of scan: it is the "Texture detail" row of the Options menu (high by default).
 - The deepest stack use was the world traversal recursion (~5 KB below the frame entry); the probes (`PROF_STK`, logged as `STK` lines) show it, and the whole scan chain is ~2.9 KB.
 
-### Checking that an optimisation does not change the picture
+## Checking that an optimisation does not change the picture
 
 `tools/hostcheck` runs the real engine and `display.c` on the host. `tools/hostcheck/run.sh` checks the low-res upscale invariants over scripted scenes (walking, console, menus, HUD, view sizes, demos); `HGOLD=file tools/hostcheck/run.sh` writes a hash of every LCD frame of the three demos plus a hash of the 8-bit render buffer and z buffer (`NO_FAST_ALIAS=1` / `NO_FAST_FACES=1` / `NO_FAST_SURFACES=1` build the original code paths, `EXTRA_DEFS="-DFOO=1"` adds compiler flags), and `tools/hostcheck/golden-compare.py a b` compares two such files (build a reference checkout with `TREE=/path OUT=ref NO_LAZY_CHECK=1` if it predates the lazy upscale). Needs clang and the Playdate SDK headers.
-
-Controls: D-pad move/turn, A fire, B jump, crank switches weapon; the system menu has "Quake Menu", "Always Run" and "Show FPS". In Quake's menus A selects and B goes back.
